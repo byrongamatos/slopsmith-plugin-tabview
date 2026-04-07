@@ -199,7 +199,9 @@ async function _tvToggle() {
         var filename = _tvFilename;
         var arrSel = document.getElementById('arr-select');
         var arrIdx = arrSel ? arrSel.value : 0;
-        var url = '/api/plugins/tabview/gp5/' + encodeURIComponent(filename) + '?arrangement=' + arrIdx;
+        // filename may already be encoded from data-play attributes — decode first
+        var decoded = decodeURIComponent(filename);
+        var url = '/api/plugins/tabview/gp5/' + encodeURIComponent(decoded) + '?arrangement=' + arrIdx;
         var resp = await fetch(url);
         if (!resp.ok) throw new Error(await resp.text());
         var data = await resp.arrayBuffer();
