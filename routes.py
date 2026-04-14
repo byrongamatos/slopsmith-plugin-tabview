@@ -14,10 +14,12 @@ if _lib not in sys.path:
 
 from song import load_song
 from psarc import unpack_psarc
+import sloppak as sloppak_mod
 
 
 def setup(app: FastAPI, context: dict):
     get_dlc_dir = context["get_dlc_dir"]
+    get_sloppak_cache_dir = context.get("get_sloppak_cache_dir")
 
     from rs2gp import rocksmith_to_gp5
 
@@ -27,14 +29,21 @@ def setup(app: FastAPI, context: dict):
         if not dlc:
             return Response("DLC folder not configured", status_code=500)
 
-        psarc_path = Path(dlc) / filename
-        if not psarc_path.exists():
+        source_path = Path(dlc) / filename
+        if not source_path.exists():
             return Response("File not found", status_code=404)
 
-        tmp = tempfile.mkdtemp(prefix="rs_tabview_")
+        tmp = None
         try:
-            unpack_psarc(str(psarc_path), tmp)
-            song = load_song(tmp)
+            if sloppak_mod.is_sloppak(source_path):
+                if not get_sloppak_cache_dir:
+                    return Response("Sloppak support unavailable", status_code=500)
+                loaded = sloppak_mod.load_song(filename, Path(dlc), get_sloppak_cache_dir())
+                song = loaded.song
+            else:
+                tmp = tempfile.mkdtemp(prefix="rs_tabview_")
+                unpack_psarc(str(source_path), tmp)
+                song = load_song(tmp)
 
             if not song.arrangements:
                 return Response("No arrangements found", status_code=404)
@@ -52,4 +61,5 @@ def setup(app: FastAPI, context: dict):
             traceback.print_exc()
             return Response(f"Conversion error: {e}", status_code=500)
         finally:
-            shutil.rmtree(tmp, ignore_errors=True)
+            if tmp:
+                shutil.rmtree(tmp, ignore_errors=True)
