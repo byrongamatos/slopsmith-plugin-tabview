@@ -356,7 +356,7 @@ def _apply_effects(gp_note, nd):
 
     bend_val = nd.get("bend", 0)
     if bend_val and bend_val > 0:
-        gp_val = int(bend_val * 50)  # RS semitones -> GP quarter-tones
+        gp_val = int(bend_val * 2)  # RS semitones -> GP quarter-tones
         eff.bend = guitarpro.BendEffect(
             type=guitarpro.BendType.bend,
             value=gp_val,
