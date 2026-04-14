@@ -1,52 +1,62 @@
 // Tab View plugin — renders Rocksmith arrangements as scrolling tablature via alphaTab.
+//
+// Architecture: the alphaTab + cursor-sync engine is wrapped in a factory
+// (createTabView) so plugins like splitscreen can mount independent tab views
+// inside their own panels, each with its own beat source and time clock. The
+// original singleton toolbar button is preserved at the bottom of the file
+// and consumes the same factory under the hood.
 
-let _tvActive = false;
-let _tvApi = null;
-let _tvContainer = null;
-let _tvSyncRAF = null;
-let _tvCurrentFile = null;
-let _tvCurrentArr = null;
-let _tvReady = false;
-let _tvFilename = null; // captured from playSong hook
+// ── alphaTab CDN loader (shared) ───────────────────────────────────────
 
-// ── alphaTab CDN loader ─────────────────────────────────────────────────
-
+let _tvScriptPromise = null;
 function _tvLoadScript() {
-    return new Promise((resolve, reject) => {
-        if (window.alphaTab) { resolve(); return; }
+    if (window.alphaTab) return Promise.resolve();
+    if (_tvScriptPromise) return _tvScriptPromise;
+    _tvScriptPromise = new Promise((resolve, reject) => {
         const s = document.createElement('script');
         s.src = 'https://cdn.jsdelivr.net/npm/@coderline/alphatab@latest/dist/alphaTab.min.js';
         s.onload = resolve;
-        s.onerror = () => reject(new Error('Failed to load alphaTab'));
+        s.onerror = () => { _tvScriptPromise = null; reject(new Error('Failed to load alphaTab')); };
         document.head.appendChild(s);
     });
+    return _tvScriptPromise;
 }
 
-// ── Container setup ─────────────────────────────────────────────────────
+// ── Factory ─────────────────────────────────────────────────────────────
+//
+// Usage:
+//   const tv = createTabView({
+//       container: someDiv,                  // required — host element for alphaTab
+//       getBeats: () => highway.getBeats(),  // required — returns [{time}] array
+//       getCurrentTime: () => audio.currentTime, // required — playback clock in seconds
+//   });
+//   await tv.load(arrayBuffer);              // load GP5 data
+//   tv.startSync();                          // begin cursor sync loop
+//   ...
+//   tv.destroy();                            // tear down alphaTab + sync + DOM nodes
+//
+// The factory creates its own inner DOM (alphaTab host + highlight overlay
+// + loading overlay) inside the given container. It does not touch any
+// global elements like #highway, #audio, or #btn-tabview.
 
-function _tvCreateContainer() {
-    if (_tvContainer) return _tvContainer;
+function createTabView(options) {
+    const container = options.container;
+    const getBeats = options.getBeats;
+    const getCurrentTime = options.getCurrentTime;
+    if (!container || typeof getBeats !== 'function' || typeof getCurrentTime !== 'function') {
+        throw new Error('createTabView: container, getBeats, getCurrentTime are required');
+    }
 
-    const c = document.createElement('div');
-    c.id = 'tabview-container';
-    c.style.cssText = [
-        'display:none',
-        'position:absolute',
-        'top:0',
-        'left:0',
-        'right:0',
-        'overflow-y:auto',
-        'background:#fff',
-        'z-index:5',
-    ].join(';');
+    // Build inner DOM
+    container.style.position = container.style.position || 'relative';
 
     const inner = document.createElement('div');
-    inner.id = 'tabview-at';
-    c.appendChild(inner);
+    inner.className = 'tabview-at';
+    inner.style.cssText = 'background:#fff;';
+    container.appendChild(inner);
 
-    // Yellow highlight overlay
     const hl = document.createElement('div');
-    hl.id = 'tabview-highlight';
+    hl.className = 'tabview-highlight';
     hl.style.cssText = [
         'position:absolute',
         'width:24px',
@@ -59,17 +69,219 @@ function _tvCreateContainer() {
         'z-index:999',
         'display:none',
     ].join(';');
-    c.appendChild(hl);
+    container.appendChild(hl);
 
-    // Loading overlay
     const ov = document.createElement('div');
-    ov.id = 'tabview-loading';
+    ov.className = 'tabview-loading';
     ov.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:#fff;z-index:10;';
     ov.innerHTML = '<span style="color:#888;font-size:14px;">Loading tablature\u2026</span>';
-    c.appendChild(ov);
+    container.appendChild(ov);
 
-    const player = document.getElementById('player');
-    player.appendChild(c);
+    let api = null;
+    let ready = false;
+    let syncRAF = null;
+    let destroyed = false;
+
+    async function load(arrayBuffer) {
+        await _tvLoadScript();
+        if (destroyed) return;
+
+        if (api) {
+            try { api.destroy(); } catch (_) {}
+            api = null;
+        }
+        ready = false;
+        inner.innerHTML = '';
+        ov.style.display = 'flex';
+
+        api = new alphaTab.AlphaTabApi(inner, {
+            core: {
+                fontDirectory: 'https://cdn.jsdelivr.net/npm/@coderline/alphatab@latest/dist/font/',
+            },
+            display: {
+                layoutMode: alphaTab.LayoutMode.Page,
+                scale: 0.9,
+            },
+            player: {
+                enablePlayer: true,
+                enableCursor: true,
+                soundFont: 'https://cdn.jsdelivr.net/npm/@coderline/alphatab@latest/dist/soundfont/sonivox.sf2',
+            },
+        });
+
+        api.scoreLoaded.on(function (score) {
+            if (score && score.tracks) {
+                try { api.changeTrackMute(score.tracks, true); } catch (_) {}
+            }
+        });
+
+        api.renderFinished.on(function () {
+            ready = true;
+            ov.style.display = 'none';
+        });
+
+        api.error.on(function (e) {
+            console.error('[TabView] alphaTab error:', e);
+        });
+
+        api.load(new Uint8Array(arrayBuffer));
+    }
+
+    function timeToTick(seconds) {
+        const beats = getBeats();
+        if (!beats || beats.length < 2) return 960;
+        if (seconds < beats[0].time) return 960;
+
+        let idx = 0;
+        for (let i = 0; i < beats.length - 1; i++) {
+            if (seconds >= beats[i].time) idx = i;
+            else break;
+        }
+
+        let frac = 0;
+        if (idx < beats.length - 1) {
+            const bStart = beats[idx].time;
+            const bEnd = beats[idx + 1].time;
+            if (bEnd > bStart) {
+                frac = Math.min(1, Math.max(0, (seconds - bStart) / (bEnd - bStart)));
+            }
+        }
+        return 960 + Math.round((idx + frac) * 960);
+    }
+
+    function findCursorRect() {
+        const selectors = ['.at-cursor-beat', '.at-cursor-bar', '.at-cursor', '[class*="cursor"]'];
+        const roots = [inner];
+        if (inner.shadowRoot) roots.push(inner.shadowRoot);
+        for (const r of roots) {
+            for (const s of selectors) {
+                const nodes = r.querySelectorAll(s);
+                for (const n of nodes) {
+                    const rect = n.getBoundingClientRect();
+                    if (rect.width > 0 && rect.height > 0) return rect;
+                }
+            }
+        }
+        return null;
+    }
+
+    function updateHighlight() {
+        const cursorRect = findCursorRect();
+        if (!cursorRect) { hl.style.display = 'none'; return; }
+
+        const wrapRect = container.getBoundingClientRect();
+        const size = Math.max(18, Math.min(36, Math.round(Math.max(cursorRect.width, cursorRect.height, 20))));
+        const x = cursorRect.left - wrapRect.left + container.scrollLeft + (cursorRect.width - size) / 2;
+        const y = cursorRect.top - wrapRect.top + container.scrollTop + (cursorRect.height - size) / 2;
+
+        hl.style.left = Math.round(x) + 'px';
+        hl.style.top = Math.round(y) + 'px';
+        hl.style.width = size + 'px';
+        hl.style.height = size + 'px';
+        hl.style.display = '';
+
+        // Auto-scroll to keep cursor visible
+        const paddingX = Math.min(180, wrapRect.width * 0.3);
+        const paddingY = Math.min(100, wrapRect.height * 0.25);
+        const relX = cursorRect.left - wrapRect.left;
+        const relY = cursorRect.top - wrapRect.top;
+
+        let needScroll = false;
+        let targetX = container.scrollLeft;
+        let targetY = container.scrollTop;
+
+        if (relX < paddingX || relX > wrapRect.width - paddingX) {
+            targetX = x - wrapRect.width / 2;
+            needScroll = true;
+        }
+        if (relY < paddingY || relY > wrapRect.height - paddingY) {
+            targetY = y - wrapRect.height / 2;
+            needScroll = true;
+        }
+        if (needScroll) {
+            container.scrollTo({ left: targetX, top: targetY, behavior: 'auto' });
+        }
+    }
+
+    function startSync() {
+        if (syncRAF) return;
+        let lastTick = -1;
+        hl.style.display = '';
+
+        function loop() {
+            if (destroyed) return;
+            syncRAF = requestAnimationFrame(loop);
+            if (!api || !ready) return;
+
+            const tick = timeToTick(getCurrentTime());
+            if (Math.abs(tick - lastTick) > 30) {
+                lastTick = tick;
+                try { api.tickPosition = tick; } catch (_) {}
+            }
+            updateHighlight();
+        }
+        loop();
+    }
+
+    function stopSync() {
+        if (syncRAF) {
+            cancelAnimationFrame(syncRAF);
+            syncRAF = null;
+        }
+        hl.style.display = 'none';
+    }
+
+    function destroy() {
+        destroyed = true;
+        stopSync();
+        if (api) {
+            try { api.destroy(); } catch (_) {}
+            api = null;
+        }
+        ready = false;
+        try { container.removeChild(inner); } catch (_) {}
+        try { container.removeChild(hl); } catch (_) {}
+        try { container.removeChild(ov); } catch (_) {}
+    }
+
+    return {
+        load,
+        startSync,
+        stopSync,
+        destroy,
+        isReady() { return ready; },
+    };
+}
+
+// Expose for plugins that want to mount tab views inside their own containers.
+window.createTabView = createTabView;
+
+// ── Singleton toolbar button (default UX) ──────────────────────────────
+//
+// Wraps the factory in a single-instance wrapper that takes over the main
+// player area when the user clicks the Tab View toolbar button. Behavior
+// matches the pre-refactor plugin exactly.
+
+let _tvActive = false;
+let _tvInstance = null;
+let _tvContainer = null;
+let _tvFilename = null;
+
+function _tvCreateContainer() {
+    if (_tvContainer) return _tvContainer;
+    const c = document.createElement('div');
+    c.id = 'tabview-container';
+    c.style.cssText = [
+        'display:none',
+        'position:absolute',
+        'top:0',
+        'left:0',
+        'right:0',
+        'overflow-y:auto',
+        'background:#fff',
+        'z-index:5',
+    ].join(';');
+    document.getElementById('player').appendChild(c);
     _tvContainer = c;
     return c;
 }
@@ -80,231 +292,52 @@ function _tvSizeContainer() {
     if (canvas) _tvContainer.style.height = canvas.height + 'px';
 }
 
-// ── alphaTab init ───────────────────────────────────────────────────────
-
-async function _tvInit(arrayBuffer) {
-    const c = _tvCreateContainer();
-    const el = document.getElementById('tabview-at');
-
-    // Destroy previous
-    if (_tvApi) {
-        try { _tvApi.destroy(); } catch (_) {}
-        _tvApi = null;
-    }
-    _tvReady = false;
-    el.innerHTML = '';
-
-    // Show loading
-    const ov = document.getElementById('tabview-loading');
-    if (ov) ov.style.display = 'flex';
-
-    _tvApi = new alphaTab.AlphaTabApi(el, {
-        core: {
-            fontDirectory: 'https://cdn.jsdelivr.net/npm/@coderline/alphatab@latest/dist/font/',
-        },
-        display: {
-            layoutMode: alphaTab.LayoutMode.Page,
-            scale: 0.9,
-        },
-        player: {
-            enablePlayer: true,
-            enableCursor: true,
-            soundFont: 'https://cdn.jsdelivr.net/npm/@coderline/alphatab@latest/dist/soundfont/sonivox.sf2',
-        },
-    });
-
-    // Mute alphaTab audio once score is loaded
-    _tvApi.scoreLoaded.on(function (score) {
-        if (score && score.tracks) {
-            try { _tvApi.changeTrackMute(score.tracks, true); } catch (_) {}
-        }
-    });
-
-    _tvApi.renderFinished.on(function () {
-        _tvReady = true;
-        const ov2 = document.getElementById('tabview-loading');
-        if (ov2) ov2.style.display = 'none';
-    });
-
-    _tvApi.error.on(function (e) {
-        console.error('[TabView] alphaTab error:', e);
-    });
-
-    // Load GP5 data
-    _tvApi.load(new Uint8Array(arrayBuffer));
-}
-
-// ── Cursor sync ─────────────────────────────────────────────────────────
-
-function _tvTimeToTick(seconds) {
-    var beats = highway.getBeats();
-    if (!beats || beats.length < 2) return 960;
-
-    // Before first beat
-    if (seconds < beats[0].time) return 960;
-
-    // Find containing beat interval
-    var idx = 0;
-    for (var i = 0; i < beats.length - 1; i++) {
-        if (seconds >= beats[i].time) idx = i;
-        else break;
-    }
-
-    var frac = 0;
-    if (idx < beats.length - 1) {
-        var bStart = beats[idx].time;
-        var bEnd = beats[idx + 1].time;
-        if (bEnd > bStart) {
-            frac = Math.min(1, Math.max(0, (seconds - bStart) / (bEnd - bStart)));
-        }
-    }
-
-    return 960 + Math.round((idx + frac) * 960);
-}
-
-function _tvStartSync() {
-    if (_tvSyncRAF) return;
-    var lastTick = -1;
-    var audio = document.getElementById('audio');
-    var hl = document.getElementById('tabview-highlight');
-    if (hl) hl.style.display = '';
-
-    function loop() {
-        _tvSyncRAF = requestAnimationFrame(loop);
-        if (!_tvApi || !_tvActive || !_tvReady) return;
-
-        var tick = _tvTimeToTick(audio.currentTime);
-        if (Math.abs(tick - lastTick) > 30) {
-            lastTick = tick;
-            try { _tvApi.tickPosition = tick; } catch (_) {}
-        }
-
-        _tvUpdateHighlight();
-    }
-    loop();
-}
-
-function _tvStopSync() {
-    if (_tvSyncRAF) {
-        cancelAnimationFrame(_tvSyncRAF);
-        _tvSyncRAF = null;
-    }
-    var hl = document.getElementById('tabview-highlight');
-    if (hl) hl.style.display = 'none';
-}
-
-// ── Yellow highlight bar ────────────────────────────────────────────────
-
-function _tvFindCursorRect() {
-    var host = document.getElementById('tabview-at');
-    if (!host) return null;
-    var selectors = ['.at-cursor-beat', '.at-cursor-bar', '.at-cursor', '[class*="cursor"]'];
-    var roots = [host];
-    if (host.shadowRoot) roots.push(host.shadowRoot);
-    for (var r = 0; r < roots.length; r++) {
-        for (var s = 0; s < selectors.length; s++) {
-            var nodes = roots[r].querySelectorAll(selectors[s]);
-            for (var n = 0; n < nodes.length; n++) {
-                var rect = nodes[n].getBoundingClientRect();
-                if (rect.width > 0 && rect.height > 0) return rect;
-            }
-        }
-    }
-    return null;
-}
-
-function _tvUpdateHighlight() {
-    var hl = document.getElementById('tabview-highlight');
-    if (!hl || !_tvContainer) return;
-
-    var cursorRect = _tvFindCursorRect();
-    if (!cursorRect) { hl.style.display = 'none'; return; }
-
-    var wrapRect = _tvContainer.getBoundingClientRect();
-    var size = Math.max(18, Math.min(36, Math.round(Math.max(cursorRect.width, cursorRect.height, 20))));
-    var x = cursorRect.left - wrapRect.left + _tvContainer.scrollLeft + (cursorRect.width - size) / 2;
-    var y = cursorRect.top - wrapRect.top + _tvContainer.scrollTop + (cursorRect.height - size) / 2;
-
-    hl.style.left = Math.round(x) + 'px';
-    hl.style.top = Math.round(y) + 'px';
-    hl.style.width = size + 'px';
-    hl.style.height = size + 'px';
-    hl.style.display = '';
-
-    // Auto-scroll to keep cursor visible
-    var paddingX = Math.min(180, wrapRect.width * 0.3);
-    var paddingY = Math.min(100, wrapRect.height * 0.25);
-
-    var relX = cursorRect.left - wrapRect.left;
-    var relY = cursorRect.top - wrapRect.top;
-
-    var needScroll = false;
-    var targetX = _tvContainer.scrollLeft;
-    var targetY = _tvContainer.scrollTop;
-
-    if (relX < paddingX || relX > wrapRect.width - paddingX) {
-        targetX = x - wrapRect.width / 2;
-        needScroll = true;
-    }
-    if (relY < paddingY || relY > wrapRect.height - paddingY) {
-        targetY = y - wrapRect.height / 2;
-        needScroll = true;
-    }
-
-    if (needScroll) {
-        _tvContainer.scrollTo({ left: targetX, top: targetY, behavior: 'auto' });
-    }
-}
-
-// ── Toggle tab view ─────────────────────────────────────────────────────
-
 async function _tvToggle() {
     if (_tvActive) {
-        // Back to highway
         _tvActive = false;
-        _tvStopSync();
+        if (_tvInstance) {
+            _tvInstance.stopSync();
+        }
         if (_tvContainer) _tvContainer.style.display = 'none';
         document.getElementById('highway').style.visibility = '';
         _tvUpdateButton();
         return;
     }
 
-    var beats = highway.getBeats();
-    if (!beats || beats.length < 2) {
-        // Song data not loaded yet
-        return;
-    }
+    const beats = highway.getBeats();
+    if (!beats || beats.length < 2) return;
 
-    var btn = document.getElementById('btn-tabview');
+    const btn = document.getElementById('btn-tabview');
     if (btn) btn.textContent = 'Loading\u2026';
 
     try {
-        await _tvLoadScript();
-
-        // Fetch GP5
-        var filename = _tvFilename;
-        var arrSel = document.getElementById('arr-select');
-        var arrIdx = arrSel ? arrSel.value : 0;
-        // filename may already be encoded from data-play attributes — decode first
-        var decoded = decodeURIComponent(filename);
-        var url = '/api/plugins/tabview/gp5/' + encodeURIComponent(decoded) + '?arrangement=' + arrIdx;
-        var resp = await fetch(url);
+        const filename = _tvFilename;
+        const arrSel = document.getElementById('arr-select');
+        const arrIdx = arrSel ? arrSel.value : 0;
+        const decoded = decodeURIComponent(filename);
+        const url = '/api/plugins/tabview/gp5/' + encodeURIComponent(decoded) + '?arrangement=' + arrIdx;
+        const resp = await fetch(url);
         if (!resp.ok) throw new Error(await resp.text());
-        var data = await resp.arrayBuffer();
+        const data = await resp.arrayBuffer();
 
-        // Init alphaTab
         _tvCreateContainer();
         _tvSizeContainer();
-        await _tvInit(data);
 
-        // Show tab, hide highway
+        if (_tvInstance) {
+            _tvInstance.destroy();
+            _tvInstance = null;
+        }
+        _tvInstance = createTabView({
+            container: _tvContainer,
+            getBeats: () => highway.getBeats(),
+            getCurrentTime: () => document.getElementById('audio').currentTime,
+        });
+        await _tvInstance.load(data);
+
         _tvActive = true;
         document.getElementById('highway').style.visibility = 'hidden';
         _tvContainer.style.display = '';
-
-        _tvCurrentFile = filename;
-        _tvCurrentArr = arrIdx;
-        _tvStartSync();
+        _tvInstance.startSync();
     } catch (e) {
         console.error('[TabView]', e);
         alert('Tab View error: ' + e.message);
@@ -313,10 +346,8 @@ async function _tvToggle() {
     _tvUpdateButton();
 }
 
-// ── Button ──────────────────────────────────────────────────────────────
-
 function _tvUpdateButton() {
-    var btn = document.getElementById('btn-tabview');
+    const btn = document.getElementById('btn-tabview');
     if (!btn) return;
     if (_tvActive) {
         btn.textContent = 'Highway';
@@ -328,14 +359,12 @@ function _tvUpdateButton() {
 }
 
 function _tvInjectButton() {
-    var controls = document.getElementById('player-controls');
+    const controls = document.getElementById('player-controls');
     if (!controls || document.getElementById('btn-tabview')) return;
+    const lyricsBtn = document.getElementById('btn-lyrics');
+    const insertBefore = lyricsBtn ? lyricsBtn.nextSibling : null;
 
-    var lyricsBtn = document.getElementById('btn-lyrics');
-    var sep = lyricsBtn ? lyricsBtn.nextElementSibling : null;
-    var insertBefore = sep || lyricsBtn ? lyricsBtn.nextSibling : null;
-
-    var btn = document.createElement('button');
+    const btn = document.createElement('button');
     btn.id = 'btn-tabview';
     btn.className = 'px-3 py-1.5 bg-dark-600 hover:bg-dark-500 rounded-lg text-xs text-gray-500 transition';
     btn.textContent = 'Tab View';
@@ -344,25 +373,19 @@ function _tvInjectButton() {
     controls.insertBefore(btn, insertBefore);
 }
 
-// ── Teardown ────────────────────────────────────────────────────────────
-
 function _tvReset() {
     _tvActive = false;
-    _tvStopSync();
-    if (_tvContainer) _tvContainer.style.display = 'none';
-    if (_tvApi) {
-        try { _tvApi.destroy(); } catch (_) {}
-        _tvApi = null;
+    if (_tvInstance) {
+        try { _tvInstance.destroy(); } catch (_) {}
+        _tvInstance = null;
     }
-    _tvReady = false;
-    document.getElementById('highway').style.visibility = '';
+    if (_tvContainer) _tvContainer.style.display = 'none';
+    const hw = document.getElementById('highway');
+    if (hw) hw.style.visibility = '';
 }
 
-// ── Hooks ───────────────────────────────────────────────────────────────
-
 (function () {
-    // Hook playSong
-    var origPlay = window.playSong;
+    const origPlay = window.playSong;
     window.playSong = async function (filename, arrangement) {
         _tvFilename = filename;
         _tvReset();
@@ -370,8 +393,7 @@ function _tvReset() {
         _tvInjectButton();
     };
 
-    // Hook changeArrangement
-    var origArr = window.changeArrangement;
+    const origArr = window.changeArrangement;
     if (origArr) {
         window.changeArrangement = function (index) {
             if (_tvActive) _tvReset();
@@ -380,6 +402,5 @@ function _tvReset() {
         };
     }
 
-    // Re-size tab container when window resizes
     window.addEventListener('resize', _tvSizeContainer);
 })();
