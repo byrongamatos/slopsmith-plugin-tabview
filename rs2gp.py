@@ -4,6 +4,7 @@ import io
 import guitarpro
 
 TICKS_PER_BEAT = 960
+SUBDIV = 8  # 32nd notes per beat
 
 # Standard tuning MIDI values: GP string 1 (highest) to N (lowest)
 GUITAR_STANDARD = [64, 59, 55, 50, 45, 40]  # E4 B3 G3 D3 A2 E2
@@ -213,57 +214,71 @@ def _make_strings(tuning, is_bass, num_strings):
 # Beat creation
 # ---------------------------------------------------------------------------
 
-def _quantize_eighth(event_time, beat_times, measure_end):
-    """Return the nearest 8th-note position index within a measure."""
+def _quantize_sixteenth(event_time, beat_times, measure_end):
+    """Return the nearest 32nd-note position index within a measure."""
     best, best_d = 0, float("inf")
     for i, bt in enumerate(beat_times):
         nxt = beat_times[i + 1] if i + 1 < len(beat_times) else measure_end
         dur = nxt - bt
-        for sub in range(2):
-            t = bt + dur * sub / 2
+        for sub in range(SUBDIV):
+            t = bt + dur * sub / SUBDIV
             d = abs(event_time - t)
             if d < best_d:
                 best_d = d
-                best = i * 2 + sub
+                best = i * SUBDIV + sub
     return best
 
 
-def _decompose_eighths(count):
-    """Break an 8th-note count into a list of guitarpro.Duration objects."""
+def _decompose_sixteenths(count):
+    """Break a 32nd-note count into a list of guitarpro.Duration objects."""
     if count <= 0:
         return [guitarpro.Duration(value=4)]
     durs = []
     rem = count
     while rem > 0:
         d = guitarpro.Duration()
-        if rem >= 8:
+        if rem >= 32:
             d.value = 1
+            rem -= 32
+        elif rem >= 24:
+            d.value = 2
+            d.isDotted = True
+            rem -= 24
+        elif rem >= 16:
+            d.value = 2
+            rem -= 16
+        elif rem >= 12:
+            d.value = 4
+            d.isDotted = True
+            rem -= 12
+        elif rem >= 8:
+            d.value = 4
             rem -= 8
         elif rem >= 6:
-            d.value = 2
+            d.value = 8
             d.isDotted = True
             rem -= 6
         elif rem >= 4:
-            d.value = 2
+            d.value = 8
             rem -= 4
         elif rem >= 3:
-            d.value = 4
+            d.value = 16
             d.isDotted = True
             rem -= 3
         elif rem >= 2:
-            d.value = 4
+            d.value = 16
             rem -= 2
         else:
-            d.value = 8
+            d.value = 32
             rem -= 1
         durs.append(d)
     return durs
 
 
-def _dur_eighths(d):
-    """Number of 8th notes a Duration occupies."""
-    base = {1: 8, 2: 4, 4: 2, 8: 1, 16: 1}
-    v = base.get(d.value, 2)
+def _dur_sixteenths(d):
+    """Number of 32nd notes a Duration occupies."""
+    base = {1: 32, 2: 16, 4: 8, 8: 4, 16: 2, 32: 1}
+    v = base.get(d.value, 8)
     if d.isDotted:
         v = int(v * 1.5)
     return max(v, 1)
@@ -271,14 +286,14 @@ def _dur_eighths(d):
 
 def _create_beats(events, m_info, voice, num_strings):
     """Build GP Beat list for one measure."""
-    total = m_info["num_beats"] * 2  # in 8th notes
+    total = m_info["num_beats"] * SUBDIV
 
     if not events:
         return _rest_beats(total, voice)
 
     slots = {}
     for ev in events:
-        pos = _quantize_eighth(ev["time"], m_info["beat_times"], m_info["end_time"])
+        pos = _quantize_sixteenth(ev["time"], m_info["beat_times"], m_info["end_time"])
         pos = max(0, min(pos, total - 1))
         slots.setdefault(pos, []).append(ev)
 
@@ -293,7 +308,7 @@ def _create_beats(events, m_info, voice, num_strings):
 
         nxt = positions[i + 1] if i + 1 < len(positions) else total
         gap = max(1, nxt - pos)
-        durations = _decompose_eighths(gap)
+        durations = _decompose_sixteenths(gap)
 
         beat = guitarpro.Beat(voice, status=guitarpro.BeatStatus.normal)
         beat.duration = durations[0]
@@ -319,11 +334,11 @@ def _create_beats(events, m_info, voice, num_strings):
                 beat.notes.append(note)
 
         beats.append(beat)
-        cursor += _dur_eighths(durations[0])
+        cursor += _dur_sixteenths(durations[0])
 
         for rd in durations[1:]:
-            beats.extend(_rest_beats(_dur_eighths(rd), voice))
-            cursor += _dur_eighths(rd)
+            beats.extend(_rest_beats(_dur_sixteenths(rd), voice))
+            cursor += _dur_sixteenths(rd)
 
     if cursor < total:
         beats.extend(_rest_beats(total - cursor, voice))
@@ -331,9 +346,9 @@ def _create_beats(events, m_info, voice, num_strings):
     return beats
 
 
-def _rest_beats(eighths, voice):
+def _rest_beats(sixteenths, voice):
     beats = []
-    for d in _decompose_eighths(eighths):
+    for d in _decompose_sixteenths(sixteenths):
         b = guitarpro.Beat(voice, status=guitarpro.BeatStatus.rest)
         b.duration = d
         beats.append(b)
