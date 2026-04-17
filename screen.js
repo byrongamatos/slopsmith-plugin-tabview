@@ -125,7 +125,6 @@ async function _tvInit(arrayBuffer) {
         _tvReady = true;
         const ov2 = document.getElementById('tabview-loading');
         if (ov2) ov2.style.display = 'none';
-        _tvApplyTheme(_tvDark);
     });
 
     _tvApi.error.on(function (e) {
@@ -317,44 +316,10 @@ async function _tvToggle() {
 
 // ── Dark mode ───────────────────────────────────────────────────────────
 
-var _TV_LIGHT = {
-    bg: '#ffffff',
-    mainGlyphColor: '#000000',
-    barSeparatorColor: '#222211',
-    barNumberColor: '#c80000',
-    staffLineColor: '#000000',
-    scoreInfoColor: '#000000',
-    secondaryGlyphColor: '#888888',
-};
-
-var _TV_DARK = {
-    bg: '#1a1a2e',
-    mainGlyphColor: '#e0e0e0',
-    barSeparatorColor: '#aaaaaa',
-    barNumberColor: '#22d3ee',
-    staffLineColor: '#888888',
-    scoreInfoColor: '#cccccc',
-    secondaryGlyphColor: '#666666',
-};
-
 function _tvApplyTheme(dark) {
     if (!_tvContainer) return;
-    var t = dark ? _TV_DARK : _TV_LIGHT;
-    _tvContainer.style.background = t.bg;
-
-    if (_tvApi) {
-        var r = _tvApi.settings.display.resources;
-        r.mainGlyphColor = t.mainGlyphColor;
-        r.barSeparatorColor = t.barSeparatorColor;
-        r.barNumberColor = t.barNumberColor;
-        r.staffLineColor = t.staffLineColor;
-        r.scoreInfoColor = t.scoreInfoColor;
-        r.secondaryGlyphColor = t.secondaryGlyphColor;
-        try {
-            _tvApi.updateSettings();
-            _tvApi.render();
-        } catch (_) {}
-    }
+    _tvContainer.style.filter = dark ? 'invert(1)' : '';
+    _tvContainer.style.background = dark ? '#000' : '#fff';
 }
 
 function _tvToggleDark() {
