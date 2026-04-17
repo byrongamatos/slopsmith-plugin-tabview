@@ -1,6 +1,7 @@
 // Tab View plugin — renders Rocksmith arrangements as scrolling tablature via alphaTab.
 
 let _tvActive = false;
+let _tvDark = false;
 let _tvApi = null;
 let _tvContainer = null;
 let _tvSyncRAF = null;
@@ -124,6 +125,7 @@ async function _tvInit(arrayBuffer) {
         _tvReady = true;
         const ov2 = document.getElementById('tabview-loading');
         if (ov2) ov2.style.display = 'none';
+        _tvApplyTheme(_tvDark);
     });
 
     _tvApi.error.on(function (e) {
@@ -313,17 +315,80 @@ async function _tvToggle() {
     _tvUpdateButton();
 }
 
+// ── Dark mode ───────────────────────────────────────────────────────────
+
+var _TV_LIGHT = {
+    bg: '#ffffff',
+    mainGlyphColor: '#000000',
+    barSeparatorColor: '#222211',
+    barNumberColor: '#c80000',
+    staffLineColor: '#000000',
+    scoreInfoColor: '#000000',
+    secondaryGlyphColor: '#888888',
+};
+
+var _TV_DARK = {
+    bg: '#1a1a2e',
+    mainGlyphColor: '#e0e0e0',
+    barSeparatorColor: '#aaaaaa',
+    barNumberColor: '#22d3ee',
+    staffLineColor: '#888888',
+    scoreInfoColor: '#cccccc',
+    secondaryGlyphColor: '#666666',
+};
+
+function _tvApplyTheme(dark) {
+    if (!_tvContainer) return;
+    var t = dark ? _TV_DARK : _TV_LIGHT;
+    _tvContainer.style.background = t.bg;
+
+    if (_tvApi) {
+        var r = _tvApi.settings.display.resources;
+        r.mainGlyphColor = t.mainGlyphColor;
+        r.barSeparatorColor = t.barSeparatorColor;
+        r.barNumberColor = t.barNumberColor;
+        r.staffLineColor = t.staffLineColor;
+        r.scoreInfoColor = t.scoreInfoColor;
+        r.secondaryGlyphColor = t.secondaryGlyphColor;
+        try {
+            _tvApi.updateSettings();
+            _tvApi.render();
+        } catch (_) {}
+    }
+}
+
+function _tvToggleDark() {
+    _tvDark = !_tvDark;
+    _tvApplyTheme(_tvDark);
+    _tvUpdateDarkButton();
+}
+
+function _tvUpdateDarkButton() {
+    var btn = document.getElementById('btn-tabview-dark');
+    if (!btn) return;
+    if (_tvDark) {
+        btn.textContent = 'Light';
+        btn.className = 'px-3 py-1.5 bg-blue-900/50 rounded-lg text-xs text-blue-300 transition';
+    } else {
+        btn.textContent = 'Dark';
+        btn.className = 'px-3 py-1.5 bg-dark-600 hover:bg-dark-500 rounded-lg text-xs text-gray-500 transition';
+    }
+}
+
 // ── Button ──────────────────────────────────────────────────────────────
 
 function _tvUpdateButton() {
     var btn = document.getElementById('btn-tabview');
+    var darkBtn = document.getElementById('btn-tabview-dark');
     if (!btn) return;
     if (_tvActive) {
         btn.textContent = 'Highway';
         btn.className = 'px-3 py-1.5 bg-blue-900/50 rounded-lg text-xs text-blue-300 transition';
+        if (darkBtn) darkBtn.style.display = '';
     } else {
         btn.textContent = 'Tab View';
         btn.className = 'px-3 py-1.5 bg-dark-600 hover:bg-dark-500 rounded-lg text-xs text-gray-500 transition';
+        if (darkBtn) darkBtn.style.display = 'none';
     }
 }
 
@@ -342,6 +407,15 @@ function _tvInjectButton() {
     btn.title = 'Toggle tablature notation view';
     btn.onclick = _tvToggle;
     controls.insertBefore(btn, insertBefore);
+
+    var darkBtn = document.createElement('button');
+    darkBtn.id = 'btn-tabview-dark';
+    darkBtn.className = 'px-3 py-1.5 bg-dark-600 hover:bg-dark-500 rounded-lg text-xs text-gray-500 transition';
+    darkBtn.textContent = 'Dark';
+    darkBtn.title = 'Toggle dark mode for tablature';
+    darkBtn.style.display = 'none';
+    darkBtn.onclick = _tvToggleDark;
+    controls.insertBefore(darkBtn, btn.nextSibling);
 }
 
 // ── Teardown ────────────────────────────────────────────────────────────
