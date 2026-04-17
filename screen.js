@@ -318,8 +318,9 @@ async function _tvToggle() {
 
 function _tvApplyTheme(dark) {
     if (!_tvContainer) return;
-    _tvContainer.style.filter = dark ? 'invert(1)' : '';
+    var at = document.getElementById('tabview-at');
     _tvContainer.style.background = dark ? '#000' : '#fff';
+    if (at) at.style.filter = dark ? 'invert(1)' : '';
 }
 
 function _tvToggleDark() {
