@@ -9,6 +9,63 @@ let _tvCurrentFile = null;
 let _tvCurrentArr = null;
 let _tvReady = false;
 let _tvFilename = null; // captured from playSong hook
+let _tvCursorStyle = "rect";
+let _tvCursorColor = null;
+
+// ── Cursor style presets ────────────────────────────────────────────────
+// See CONTRIBUTING.md for how to add new cursor styles.
+
+var _tvCursorStyles = {
+    rect: {
+        name: "Rectangle",
+        defaultColor: 'rgba(34,211,238,0.9)',
+        css: function (color) {
+            var c = color || this.defaultColor;
+            return {
+                width: '24px',
+                height: '24px',
+                background: c.replace(/[\d.]+\)$/, '0.15)'),
+                border: '2px solid ' + c,
+                borderRadius: '4px',
+                boxShadow: '0 0 0 1px ' + c.replace(/[\d.]+\)$/, '0.3)') + ',0 0 12px ' + c + ',0 0 24px ' + c.replace(/[\d.]+\)$/, '0.25)'),
+            };
+        },
+        position: function (cursorRect, wrapRect, scrollLeft, scrollTop) {
+            var size = Math.max(18, Math.min(36, Math.round(Math.max(cursorRect.width, cursorRect.height, 20))));
+            return {
+                x: cursorRect.left - wrapRect.left + scrollLeft + (cursorRect.width - size) / 2,
+                y: cursorRect.top - wrapRect.top + scrollTop + (cursorRect.height - size) / 2,
+                width: size + 'px',
+                height: size + 'px',
+            };
+        },
+    },
+    line: {
+        name: "Line",
+        defaultColor: 'rgba(34,211,238,0.9)',
+        css: function (color) {
+            var c = color || this.defaultColor;
+            return {
+                width: '2px',
+                height: '100%',
+                background: c,
+                border: 'none',
+                borderRadius: '1px',
+                boxShadow: '0 0 6px ' + c + ',0 0 12px ' + c,
+            };
+        },
+        position: function (cursorRect, wrapRect, scrollLeft, scrollTop) {
+            return {
+                x: cursorRect.left - wrapRect.left + scrollLeft + (cursorRect.width / 2) - 1,
+                y: cursorRect.top - wrapRect.top + scrollTop,
+                width: '2px',
+                height: Math.round(cursorRect.height) + 'px',
+            };
+        },
+    }, 
+};
+
+_tvLoadSettings();
 
 // ── alphaTab CDN loader ─────────────────────────────────────────────────
 
@@ -45,23 +102,19 @@ function _tvCreateContainer() {
     inner.id = 'tabview-at';
     c.appendChild(inner);
 
-    // Yellow highlight overlay
+    // Apply common style to highlight cursor and then apply user config
     const hl = document.createElement('div');
     hl.id = 'tabview-highlight';
+    
     hl.style.cssText = [
         'position:absolute',
-        'width:24px',
-        'height:24px',
-        'background:rgba(34,211,238,0.15)',
-        'border:2px solid rgba(34,211,238,0.9)',
-        'border-radius:4px',
-        'box-shadow:0 0 0 1px rgba(34,211,238,0.3),0 0 12px rgba(34,211,238,0.6),0 0 24px rgba(34,211,238,0.25)',
         'pointer-events:none',
         'z-index:999',
         'display:none',
+        'top:0',
     ].join(';');
+    _tvApplyCursorStyle(hl);
     c.appendChild(hl);
-
     // Loading overlay
     const ov = document.createElement('div');
     ov.id = 'tabview-loading';
@@ -214,6 +267,13 @@ function _tvFindCursorRect() {
     return null;
 }
 
+function _tvApplyCursorStyle(hl) {
+    if (!hl) hl = document.getElementById('tabview-highlight');
+    if (!hl) return;
+    var style = _tvCursorStyles[_tvCursorStyle] || _tvCursorStyles.rect;
+    Object.assign(hl.style, style.css(_tvCursorColor));
+}
+
 function _tvUpdateHighlight() {
     var hl = document.getElementById('tabview-highlight');
     if (!hl || !_tvContainer) return;
@@ -222,14 +282,13 @@ function _tvUpdateHighlight() {
     if (!cursorRect) { hl.style.display = 'none'; return; }
 
     var wrapRect = _tvContainer.getBoundingClientRect();
-    var size = Math.max(18, Math.min(36, Math.round(Math.max(cursorRect.width, cursorRect.height, 20))));
-    var x = cursorRect.left - wrapRect.left + _tvContainer.scrollLeft + (cursorRect.width - size) / 2;
-    var y = cursorRect.top - wrapRect.top + _tvContainer.scrollTop + (cursorRect.height - size) / 2;
+    var style = _tvCursorStyles[_tvCursorStyle] || _tvCursorStyles.rect;
+    var pos = style.position(cursorRect, wrapRect, _tvContainer.scrollLeft, _tvContainer.scrollTop);
 
-    hl.style.left = Math.round(x) + 'px';
-    hl.style.top = Math.round(y) + 'px';
-    hl.style.width = size + 'px';
-    hl.style.height = size + 'px';
+    hl.style.left = Math.round(pos.x) + 'px';
+    hl.style.top = Math.round(pos.y) + 'px';
+    hl.style.width = pos.width;
+    hl.style.height = pos.height;
     hl.style.display = '';
 
     // Auto-scroll to keep cursor visible
@@ -244,11 +303,11 @@ function _tvUpdateHighlight() {
     var targetY = _tvContainer.scrollTop;
 
     if (relX < paddingX || relX > wrapRect.width - paddingX) {
-        targetX = x - wrapRect.width / 2;
+        targetX = pos.x - wrapRect.width / 2;
         needScroll = true;
     }
     if (relY < paddingY || relY > wrapRect.height - paddingY) {
-        targetY = y - wrapRect.height / 2;
+        targetY = pos.y - wrapRect.height / 2;
         needScroll = true;
     }
 
@@ -422,4 +481,73 @@ function _tvReset() {
 
     // Re-size tab container when window resizes
     window.addEventListener('resize', _tvSizeContainer);
+
+    // Populate settings UI once injected into DOM
+    _tvApplySettingsToUI();
+    new MutationObserver(_tvApplySettingsToUI).observe(document.body, { childList: true, subtree: true });
 })();
+
+// ── Settings ────────────────────────────────────────────────────────────
+
+var _tvStorageKey = 'tabview-settings';
+
+function _tvLoadSettings() {
+    try {
+        var raw = localStorage.getItem(_tvStorageKey);
+        if (!raw) return;
+        var settings = JSON.parse(raw);
+        if (settings.cursorStyle) _tvCursorStyle = settings.cursorStyle;
+        if (settings.cursorColor) _tvCursorColor = settings.cursorColor;
+    } catch (e) { /* localStorage unavailable */ }
+}
+
+function _tvPopulateCursorStyleSelect() {
+    var select = document.getElementById('tabview-cursor-style');
+    if (!select || select.children.length > 0) return;
+
+    for (var key in _tvCursorStyles) {
+        var option = document.createElement('option');
+        option.value = key;
+        option.textContent = _tvCursorStyles[key].name || key;
+        select.appendChild(option);
+    }
+
+    select.value = _tvCursorStyle;
+}
+
+function _tvApplySettingsToUI() {
+    _tvPopulateCursorStyleSelect();
+
+    var styleSelect = document.getElementById('tabview-cursor-style');
+    if (styleSelect) styleSelect.value = _tvCursorStyle;
+
+    var colorPicker = document.getElementById('tabview-cursor-color');
+    if (colorPicker) colorPicker.value = _tvCursorColor || '#22d3ee';
+}
+
+function _tvSaveSettings() {
+    try {
+        localStorage.setItem(_tvStorageKey, JSON.stringify({
+            cursorStyle: _tvCursorStyle,
+            cursorColor: _tvCursorColor,
+        }));
+    } catch (e) { /* localStorage unavailable */ }
+}
+
+window.tvSelectCursorStyle = function (cursorStyle) {
+    _tvCursorStyle = cursorStyle;
+    _tvApplyCursorStyle();
+    _tvSaveSettings();
+};
+
+window.tvSetCursorColor = function (color) {
+    if (color && color.startsWith('#')) {
+        var r = parseInt(color.slice(1, 3), 16);
+        var g = parseInt(color.slice(3, 5), 16);
+        var b = parseInt(color.slice(5, 7), 16);
+        color = 'rgba(' + r + ',' + g + ',' + b + ',0.9)';
+    }
+    _tvCursorColor = color || null;
+    _tvApplyCursorStyle();
+    _tvSaveSettings();
+};

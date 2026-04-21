@@ -11,6 +11,7 @@ A [Slopsmith](https://github.com/byrongamatos/slopsmith) plugin that renders Roc
 - Preserves techniques: bends, slides, hammer-ons, pull-offs, harmonics, palm mutes, tremolo picking
 - Handles custom tunings and capo
 - Per-measure tempo changes
+- Selectable cursor styles (Rectangle or Line) with customizable color
 
 ## Installation
 
@@ -22,6 +23,13 @@ git clone https://github.com/byrongamatos/slopsmith-plugin-tabview.git tabview
 ```
 
 Restart Slopsmith. The plugin loads automatically.
+
+## Configuring
+Under **Settings** -> **Tab View**, you can select your cursor style. Current available styles are:
+- Rectangle
+- Line
+
+You can also customize the color of the cursor using the color selector.
 
 ## Usage
 
@@ -50,3 +58,4 @@ Restart Slopsmith. The plugin loads automatically.
 | `routes.py` | FastAPI endpoint serving GP5 files |
 | `rs2gp.py` | Rocksmith → Guitar Pro 5 converter |
 | `screen.js` | Frontend: alphaTab integration, cursor sync, UI |
+| `settings.html` | Settings: Cursor style settings |
