@@ -489,11 +489,10 @@ function _tvReset() {
 
 // ── Settings ────────────────────────────────────────────────────────────
 
-var _tvStorageKey = 'tabview-settings';
-
 function _tvLoadSettings() {
     try {
-        var raw = localStorage.getItem(_tvStorageKey);
+        const _tvStorageKey = 'tabview-settings';
+        const raw = localStorage.getItem(_tvStorageKey);
         if (!raw) return;
         var settings = JSON.parse(raw);
         if (settings.cursorStyle) _tvCursorStyle = settings.cursorStyle;
@@ -515,6 +514,17 @@ function _tvPopulateCursorStyleSelect() {
     select.value = _tvCursorStyle;
 }
 
+function _tvRgbaToHex(rgba){
+    var m = /^rgba\((\d{1,3}%?),\s*(\d{1,3}%?),\s*(\d{1,3}%?),\s*(\d*(?:\.\d+)?)\)$/.exec(rgba);
+
+    if (!m) return null;
+
+    // The alpha value is discarded
+    var r = parseInt(m[1],10), g = parseInt(m[2],10), b=parseInt(m[3],10);
+
+    return '#'+ ((1<<24) | (r<<16) | (g<<8) | b).toString(16).slice(1);
+}
+
 function _tvApplySettingsToUI() {
     _tvPopulateCursorStyleSelect();
 
@@ -522,7 +532,7 @@ function _tvApplySettingsToUI() {
     if (styleSelect) styleSelect.value = _tvCursorStyle;
 
     var colorPicker = document.getElementById('tabview-cursor-color');
-    if (colorPicker) colorPicker.value = _tvCursorColor || '#22d3ee';
+    if (colorPicker) colorPicker.value = _tvRgbaToHex(_tvCursorColor) || '#22d3ee';
 }
 
 function _tvSaveSettings() {
