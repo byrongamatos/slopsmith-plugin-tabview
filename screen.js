@@ -62,7 +62,7 @@ var _tvCursorStyles = {
                 height: Math.round(cursorRect.height) + 'px',
             };
         },
-    }, 
+    },
 };
 
 _tvLoadSettings();
@@ -105,7 +105,7 @@ function _tvCreateContainer() {
     // Apply common style to highlight cursor and then apply user config
     const hl = document.createElement('div');
     hl.id = 'tabview-highlight';
-    
+
     hl.style.cssText = [
         'position:absolute',
         'pointer-events:none',
@@ -142,7 +142,7 @@ async function _tvInit(arrayBuffer) {
 
     // Destroy previous
     if (_tvApi) {
-        try { _tvApi.destroy(); } catch (_) {}
+        try { _tvApi.destroy(); } catch (_) { }
         _tvApi = null;
     }
     _tvReady = false;
@@ -170,7 +170,7 @@ async function _tvInit(arrayBuffer) {
     // Mute alphaTab audio once score is loaded
     _tvApi.scoreLoaded.on(function (score) {
         if (score && score.tracks) {
-            try { _tvApi.changeTrackMute(score.tracks, true); } catch (_) {}
+            try { _tvApi.changeTrackMute(score.tracks, true); } catch (_) { }
         }
     });
 
@@ -230,7 +230,7 @@ function _tvStartSync() {
         var tick = _tvTimeToTick(audio.currentTime);
         if (Math.abs(tick - lastTick) > 30) {
             lastTick = tick;
-            try { _tvApi.tickPosition = tick; } catch (_) {}
+            try { _tvApi.tickPosition = tick; } catch (_) { }
         }
 
         _tvUpdateHighlight();
@@ -450,7 +450,7 @@ function _tvReset() {
     _tvStopSync();
     if (_tvContainer) _tvContainer.style.display = 'none';
     if (_tvApi) {
-        try { _tvApi.destroy(); } catch (_) {}
+        try { _tvApi.destroy(); } catch (_) { }
         _tvApi = null;
     }
     _tvReady = false;
@@ -514,15 +514,15 @@ function _tvPopulateCursorStyleSelect() {
     select.value = _tvCursorStyle;
 }
 
-function _tvRgbaToHex(rgba){
+function _tvRgbaToHex(rgba) {
     var m = /^rgba\((\d{1,3}%?),\s*(\d{1,3}%?),\s*(\d{1,3}%?),\s*(\d*(?:\.\d+)?)\)$/.exec(rgba);
 
     if (!m) return null;
 
     // The alpha value is discarded
-    var r = parseInt(m[1],10), g = parseInt(m[2],10), b=parseInt(m[3],10);
+    var r = parseInt(m[1], 10), g = parseInt(m[2], 10), b = parseInt(m[3], 10);
 
-    return '#'+ ((1<<24) | (r<<16) | (g<<8) | b).toString(16).slice(1);
+    return '#' + ((1 << 24) | (r << 16) | (g << 8) | b).toString(16).slice(1);
 }
 
 function _tvApplySettingsToUI() {
