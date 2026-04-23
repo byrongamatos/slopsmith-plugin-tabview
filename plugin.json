@@ -4,5 +4,6 @@
   "version": "1.0.0",
   "private": false,
   "script": "screen.js",
-  "routes": "routes.py"
+  "routes": "routes.py",
+  "settings": { "html": "settings.html" }
 }

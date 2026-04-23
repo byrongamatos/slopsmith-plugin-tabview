@@ -1,0 +1,13 @@
+<div>
+    <label class="text-sm font-medium text-gray-400 mb-2 block">Tab View</label>
+    <div class="flex items-center gap-3 mt-2">
+        <label class="text-sm text-gray-300 mr-2">Cursor style:</label>
+        <select id="tabview-cursor-style" onchange="tvSelectCursorStyle(this.value)" class="bg-dark-600 border border-gray-700 rounded-lg px-2 py-1.5 text-xs text-gray-300 outline-none">
+        </select>
+    </div>
+    <div class="flex items-center gap-3 mt-3">
+        <label class="text-sm text-gray-300 mr-2">Cursor color:</label>
+        <input type="color" id="tabview-cursor-color" onchange="tvSetCursorColor(this.value)" class="w-8 h-8 bg-dark-600 border border-gray-700 rounded-lg cursor-pointer" value="#22d3ee">
+        <button onclick="tvSetCursorColor(null); document.getElementById('tabview-cursor-color').value='#22d3ee';" class="px-2 py-1 bg-dark-600 hover:bg-dark-500 rounded-lg text-xs text-gray-500 transition">Reset</button>
+    </div>
+</div>
