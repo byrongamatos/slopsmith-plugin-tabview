@@ -32,6 +32,12 @@ Returns an object of CSS properties that get applied to the highlight element vi
 
 Properties you'll typically set: `width`, `height`, `background`, `border`, `borderRadius`, `boxShadow`. The base styles (`position:absolute`, `pointer-events:none`, `z-index`, `display`) are already set on the element, so you don't need to include those.
 
+#### Color Format
+
+User-selected colors are converted to `rgba()` strings before being passed to your `css` function. If no custom color is set, `color` will be `null`. Always fall back to `this.defaultColor` in that case.
+
+Note that `defaultColor` should always be set as `rgba(R, G, B, A)` as the plugin requires an alpha value for rendering functions. Setting to `rgb(R, G, B)` or hex (`#RRGGBB`) notation is not supported.
+
 ### `position(cursorRect, wrapRect, scrollLeft, scrollTop)`
 
 Returns an object with `x`, `y`, `width`, and `height` that positions the highlight relative to the scrollable container.
@@ -51,6 +57,8 @@ Here's the line style for reference (Guitar Pro/Songsterr style):
 
 ```js
 line: {
+    // NOTE: Color is always in rgba(R, G, B, A) format
+    // See Color format above
     defaultColor: 'rgba(34,211,238,0.9)',
     css: function (color) {
         var c = color || this.defaultColor;
@@ -77,8 +85,3 @@ line: {
 ### Registering the Style
 
 To register a new style, simply add your style object to the `_tvCursorStyles` map in `screen.js`. It will be registered in the settings menu as the defined `name` property.
-
-
-### Color Format
-
-User-selected colors are converted to `rgba()` strings before being passed to your `css` function. If no custom color is set, `color` will be `null`. Always fall back to `this.defaultColor` in that case.

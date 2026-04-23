@@ -15,13 +15,14 @@ const _tvStorageKey = 'tabview-settings';
 
 // ── Cursor style presets ────────────────────────────────────────────────
 // See CONTRIBUTING.md for how to add new cursor styles.
+// NOTE: Color should always be in rgba(R, G, B, A) format
 
-var _tvCursorStyles = {
+const _tvCursorStyles = {
     rect: {
         name: "Rectangle",
         defaultColor: 'rgba(34,211,238,0.9)',
         css: function (color) {
-            var c = color || this.defaultColor;
+            const c = color || this.defaultColor;
             return {
                 width: '24px',
                 height: '24px',
@@ -32,7 +33,7 @@ var _tvCursorStyles = {
             };
         },
         position: function (cursorRect, wrapRect, scrollLeft, scrollTop) {
-            var size = Math.max(18, Math.min(36, Math.round(Math.max(cursorRect.width, cursorRect.height, 20))));
+            const size = Math.max(18, Math.min(36, Math.round(Math.max(cursorRect.width, cursorRect.height, 20))));
             return {
                 x: cursorRect.left - wrapRect.left + scrollLeft + (cursorRect.width - size) / 2,
                 y: cursorRect.top - wrapRect.top + scrollTop + (cursorRect.height - size) / 2,
@@ -45,7 +46,7 @@ var _tvCursorStyles = {
         name: "Line",
         defaultColor: 'rgba(34,211,238,0.9)',
         css: function (color) {
-            var c = color || this.defaultColor;
+            const c = color || this.defaultColor;
             return {
                 width: '2px',
                 height: '100%',
@@ -246,7 +247,7 @@ function _tvStopSync() {
     if (hl) hl.style.display = 'none';
 }
 
-// ── Yellow highlight bar ────────────────────────────────────────────────
+// ── Cursor Highlight Rendering and Auto Scroll ───────────────────────────
 
 function _tvFindCursorRect() {
     var host = document.getElementById('tabview-at');
@@ -269,20 +270,20 @@ function _tvFindCursorRect() {
 function _tvApplyCursorStyle(hl) {
     if (!hl) hl = document.getElementById('tabview-highlight');
     if (!hl) return;
-    var style = _tvCursorStyles[_tvCursorStyle] || _tvCursorStyles.rect;
+    const style = _tvCursorStyles[_tvCursorStyle] || _tvCursorStyles.rect;
     Object.assign(hl.style, style.css(_tvCursorColor));
 }
 
 function _tvUpdateHighlight() {
-    var hl = document.getElementById('tabview-highlight');
+    const hl = document.getElementById('tabview-highlight');
     if (!hl || !_tvContainer) return;
 
-    var cursorRect = _tvFindCursorRect();
+    const cursorRect = _tvFindCursorRect();
     if (!cursorRect) { hl.style.display = 'none'; return; }
 
-    var wrapRect = _tvContainer.getBoundingClientRect();
-    var style = _tvCursorStyles[_tvCursorStyle] || _tvCursorStyles.rect;
-    var pos = style.position(cursorRect, wrapRect, _tvContainer.scrollLeft, _tvContainer.scrollTop);
+    const wrapRect = _tvContainer.getBoundingClientRect();
+    const style = _tvCursorStyles[_tvCursorStyle] || _tvCursorStyles.rect;
+    const pos = style.position(cursorRect, wrapRect, _tvContainer.scrollLeft, _tvContainer.scrollTop);
 
     hl.style.left = Math.round(pos.x) + 'px';
     hl.style.top = Math.round(pos.y) + 'px';
@@ -291,15 +292,15 @@ function _tvUpdateHighlight() {
     hl.style.display = '';
 
     // Auto-scroll to keep cursor visible
-    var paddingX = Math.min(180, wrapRect.width * 0.3);
-    var paddingY = Math.min(100, wrapRect.height * 0.25);
+    const paddingX = Math.min(180, wrapRect.width * 0.3);
+    const paddingY = Math.min(100, wrapRect.height * 0.25);
 
-    var relX = cursorRect.left - wrapRect.left;
-    var relY = cursorRect.top - wrapRect.top;
+    const relX = cursorRect.left - wrapRect.left;
+    const relY = cursorRect.top - wrapRect.top;
 
-    var needScroll = false;
-    var targetX = _tvContainer.scrollLeft;
-    var targetY = _tvContainer.scrollTop;
+    let needScroll = false;
+    let targetX = _tvContainer.scrollLeft;
+    let targetY = _tvContainer.scrollTop;
 
     if (relX < paddingX || relX > wrapRect.width - paddingX) {
         targetX = pos.x - wrapRect.width / 2;
@@ -483,9 +484,9 @@ function _tvReset() {
 
     // Populate settings UI once injected into DOM
     _tvLoadSettings();
-    var _tvSettingsObserver = new MutationObserver(function () {
+    const _tvSettingsObserver = new MutationObserver(function () {
         _tvApplySettingsToUI();
-        var s = document.getElementById('tabview-cursor-style');
+        const s = document.getElementById('tabview-cursor-style');
         if (s && s.children.length > 0) _tvSettingsObserver.disconnect();
     });
     _tvSettingsObserver.observe(document.body, { childList: true, subtree: true });
@@ -497,18 +498,18 @@ function _tvLoadSettings() {
     try {
         const raw = localStorage.getItem(_tvStorageKey);
         if (!raw) return;
-        var settings = JSON.parse(raw);
+        const settings = JSON.parse(raw);
         if (settings.cursorStyle) _tvCursorStyle = settings.cursorStyle;
         if (settings.cursorColor) _tvCursorColor = settings.cursorColor;
     } catch (e) { /* localStorage unavailable */ }
 }
 
 function _tvPopulateCursorStyleSelect() {
-    var select = document.getElementById('tabview-cursor-style');
+    const select = document.getElementById('tabview-cursor-style');
     if (!select || select.children.length > 0) return;
 
     for (var key in _tvCursorStyles) {
-        var option = document.createElement('option');
+        const option = document.createElement('option');
         option.value = key;
         option.textContent = _tvCursorStyles[key].name || key;
         select.appendChild(option);
@@ -518,12 +519,12 @@ function _tvPopulateCursorStyleSelect() {
 }
 
 function _tvRgbaToHex(rgba) {
-    var m = /^rgba\((\d{1,3}%?),\s*(\d{1,3}%?),\s*(\d{1,3}%?),\s*(\d*(?:\.\d+)?)\)$/.exec(rgba);
+    const m = /^rgba\((\d{1,3}%?),\s*(\d{1,3}%?),\s*(\d{1,3}%?),\s*(\d*(?:\.\d+)?)\)$/.exec(rgba);
 
     if (!m) return null;
 
     // The alpha value is discarded
-    var r = parseInt(m[1], 10), g = parseInt(m[2], 10), b = parseInt(m[3], 10);
+    const r = parseInt(m[1], 10), g = parseInt(m[2], 10), b = parseInt(m[3], 10);
 
     return '#' + ((1 << 24) | (r << 16) | (g << 8) | b).toString(16).slice(1);
 }
@@ -531,10 +532,10 @@ function _tvRgbaToHex(rgba) {
 function _tvApplySettingsToUI() {
     _tvPopulateCursorStyleSelect();
 
-    var styleSelect = document.getElementById('tabview-cursor-style');
+    const styleSelect = document.getElementById('tabview-cursor-style');
     if (styleSelect) styleSelect.value = _tvCursorStyle;
 
-    var colorPicker = document.getElementById('tabview-cursor-color');
+    const colorPicker = document.getElementById('tabview-cursor-color');
     if (colorPicker) colorPicker.value = _tvRgbaToHex(_tvCursorColor) || '#22d3ee';
 }
 
@@ -555,9 +556,9 @@ window.tvSelectCursorStyle = function (cursorStyle) {
 
 window.tvSetCursorColor = function (color) {
     if (color && color.startsWith('#')) {
-        var r = parseInt(color.slice(1, 3), 16);
-        var g = parseInt(color.slice(3, 5), 16);
-        var b = parseInt(color.slice(5, 7), 16);
+        const r = parseInt(color.slice(1, 3), 16);
+        const g = parseInt(color.slice(3, 5), 16);
+        const b = parseInt(color.slice(5, 7), 16);
         color = 'rgba(' + r + ',' + g + ',' + b + ',0.9)';
     }
     _tvCursorColor = color || null;
