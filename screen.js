@@ -11,6 +11,7 @@ let _tvReady = false;
 let _tvFilename = null; // captured from playSong hook
 let _tvCursorStyle = "rect";
 let _tvCursorColor = null;
+const _tvStorageKey = 'tabview-settings';
 
 // ── Cursor style presets ────────────────────────────────────────────────
 // See CONTRIBUTING.md for how to add new cursor styles.
@@ -64,8 +65,6 @@ var _tvCursorStyles = {
         },
     },
 };
-
-_tvLoadSettings();
 
 // ── alphaTab CDN loader ─────────────────────────────────────────────────
 
@@ -483,15 +482,19 @@ function _tvReset() {
     window.addEventListener('resize', _tvSizeContainer);
 
     // Populate settings UI once injected into DOM
-    _tvApplySettingsToUI();
-    new MutationObserver(_tvApplySettingsToUI).observe(document.body, { childList: true, subtree: true });
+    _tvLoadSettings();
+    var _tvSettingsObserver = new MutationObserver(function () {
+        _tvApplySettingsToUI();
+        var s = document.getElementById('tabview-cursor-style');
+        if (s && s.children.length > 0) _tvSettingsObserver.disconnect();
+    });
+    _tvSettingsObserver.observe(document.body, { childList: true, subtree: true });
 })();
 
 // ── Settings ────────────────────────────────────────────────────────────
 
 function _tvLoadSettings() {
     try {
-        const _tvStorageKey = 'tabview-settings';
         const raw = localStorage.getItem(_tvStorageKey);
         if (!raw) return;
         var settings = JSON.parse(raw);
