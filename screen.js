@@ -1,29 +1,83 @@
-// Tab View plugin — renders Rocksmith arrangements as scrolling tablature via alphaTab.
+// Tab View visualization plugin — renders Rocksmith arrangements as
+// scrolling tablature via alphaTab (https://alphatab.net/).
+//
+// Wave B migration (slopsmith#36): the plugin used to be a toggle
+// button sitting next to the highway. It's now a full-replacement
+// viz selected via the picker; activation, deactivation, and
+// teardown all flow through slopsmith core's setRenderer lifecycle.
+// tabview is arrangement-agnostic (we can render any arrangement's
+// tabs), so there's no matchesArrangement — Auto mode won't pick it
+// automatically; users select it manually from the viz picker.
+//
+// Single-instance assumption: the alphaTab container, the cursor
+// highlight, and the cursor-sync state are module-scope. The main
+// player's picker uses at most one instance at a time. Splitscreen's
+// per-panel setRenderer adoption (Wave C) will re-factor these into
+// createFactory closures so multiple panels can host independent
+// tabview instances.
 
-let _tvActive = false;
-let _tvDark = false;
+(function () {
+'use strict';
+
+// ═══════════════════════════════════════════════════════════════════════
+// Module-level state
+// ═══════════════════════════════════════════════════════════════════════
+
 let _tvApi = null;
 let _tvContainer = null;
-let _tvSyncRAF = null;
-let _tvCurrentFile = null;
-let _tvCurrentArr = null;
 let _tvReady = false;
-let _tvFilename = null; // captured from playSong hook
+let _tvFilename = null;     // captured from playSong wrap + arrangement:changed
+let _tvCurrentFile = null;  // filename the currently-loaded GP5 was fetched for
+let _tvCurrentArr = null;   // arrangement_index the current GP5 was fetched for
+let _tvLoadingFile = null;  // filename a currently-in-flight fetch is targeting
+let _tvLoadingArr = null;   // arrangement_index that fetch is targeting
+let _tvFailedFile = null;   // last (filename, arr_index) pair whose fetch failed —
+let _tvFailedArr = null;    // used by draw() to avoid a per-frame retry storm
+let _tvHighwayCanvas = null;
+let _tvPrevVisibility = '';
+let _tvLastTick = -1;
+// Monotonic init counter. Each init() bumps it; fetch / alphaTab
+// callbacks capture the token and bail if a newer init has started
+// since. Guards against a rapid arrangement switch where a pending
+// fetch would otherwise install stale GP5 bytes over the new one.
+let _tvInitToken = 0;
+// Auto-dismiss timer handle for the fetch/render error banner.
+// Tracked so _tvRemoveErrorBanner can cancel a pending dismissal
+// when a new banner preempts the previous one (or when destroy
+// tears everything down).
+let _tvErrorBannerTimeout = null;
 
-// ── alphaTab CDN loader ─────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════
+// alphaTab CDN loader (memoized — one load per page)
+// ═══════════════════════════════════════════════════════════════════════
 
+// Pin alphaTab to a specific release so new jsDelivr cache invalidations
+// or upstream breaking changes can't land silently in production. Bump
+// this when the alphaTab CDN publishes a version tested against the
+// cursor-sync / tab-highlight behavior below.
+const ALPHATAB_VERSION = '1.8.2';
+const ALPHATAB_CDN_BASE = 'https://cdn.jsdelivr.net/npm/@coderline/alphatab@' + ALPHATAB_VERSION + '/dist';
+
+let _alphaTabLoadPromise = null;
 function _tvLoadScript() {
-    return new Promise((resolve, reject) => {
-        if (window.alphaTab) { resolve(); return; }
+    if (window.alphaTab) return Promise.resolve();
+    if (_alphaTabLoadPromise) return _alphaTabLoadPromise;
+    _alphaTabLoadPromise = new Promise((resolve, reject) => {
         const s = document.createElement('script');
-        s.src = 'https://cdn.jsdelivr.net/npm/@coderline/alphatab@latest/dist/alphaTab.min.js';
+        s.src = ALPHATAB_CDN_BASE + '/alphaTab.min.js';
         s.onload = resolve;
-        s.onerror = () => reject(new Error('Failed to load alphaTab'));
+        s.onerror = () => {
+            _alphaTabLoadPromise = null;  // allow retry on next init
+            reject(new Error('Failed to load alphaTab'));
+        };
         document.head.appendChild(s);
     });
+    return _alphaTabLoadPromise;
 }
 
-// ── Container setup ─────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════
+// Container setup
+// ═══════════════════════════════════════════════════════════════════════
 
 function _tvCreateContainer() {
     if (_tvContainer) return _tvContainer;
@@ -45,7 +99,7 @@ function _tvCreateContainer() {
     inner.id = 'tabview-at';
     c.appendChild(inner);
 
-    // Yellow highlight overlay
+    // Cursor highlight overlay
     const hl = document.createElement('div');
     hl.id = 'tabview-highlight';
     hl.style.cssText = [
@@ -62,14 +116,17 @@ function _tvCreateContainer() {
     ].join(';');
     c.appendChild(hl);
 
-    // Loading overlay
-    const ov = document.createElement('div');
-    ov.id = 'tabview-loading';
-    ov.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:#fff;z-index:10;';
-    ov.innerHTML = '<span style="color:#888;font-size:14px;">Loading tablature\u2026</span>';
-    c.appendChild(ov);
+    // (The previous "Loading tablature…" overlay was removed here:
+    // on the initial activation the container itself stayed
+    // display:none until renderFinished fired, so the overlay was
+    // never visible. Rather than showing the container-behind-
+    // highway mid-load — which would flash white behind a
+    // translucent highway canvas — we just keep the 2D highway
+    // visible through the load window. renderFinished swaps in the
+    // rendered overlay once it has actual content.)
 
     const player = document.getElementById('player');
+    if (!player) return null;
     player.appendChild(c);
     _tvContainer = c;
     return c;
@@ -77,31 +134,91 @@ function _tvCreateContainer() {
 
 function _tvSizeContainer() {
     if (!_tvContainer) return;
-    const canvas = document.getElementById('highway');
-    if (canvas) { _tvContainer.style.top = '60px'; _tvContainer.style.height = (canvas.getBoundingClientRect().height - 60) + 'px'; }
+    const canvas = _tvHighwayCanvas || document.getElementById('highway');
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    _tvContainer.style.top = '60px';
+    _tvContainer.style.height = Math.max(0, rect.height - 60) + 'px';
 }
 
-// ── alphaTab init ───────────────────────────────────────────────────────
+function _tvRemoveContainer() {
+    if (_tvContainer) {
+        _tvContainer.remove();
+        _tvContainer = null;
+    }
+}
 
-async function _tvInit(arrayBuffer) {
+// ═══════════════════════════════════════════════════════════════════════
+// Error banner — surfaces fetch / render failures without swallowing
+// the highway fallback
+// ═══════════════════════════════════════════════════════════════════════
+//
+// When the GP5 fetch or alphaTab render fails, we hide the tabview
+// container so the 2D highway stays visible. That alone leaves the
+// failure silent to anyone who can't open devtools. A small,
+// auto-dismissing banner anchored to the top of #player surfaces the
+// error without covering the highway — living OUTSIDE the tabview
+// container so it coexists with the fallback renderer instead of
+// occluding it.
+
+function _tvShowErrorBanner(message) {
+    _tvRemoveErrorBanner();
+    const player = document.getElementById('player');
+    if (!player) return;
+    const banner = document.createElement('div');
+    banner.id = 'tabview-error-banner';
+    banner.setAttribute('role', 'alert');
+    banner.style.cssText = [
+        'position:absolute',
+        'top:10px',
+        'left:50%',
+        'transform:translateX(-50%)',
+        'background:rgba(220,80,80,0.94)',
+        'color:#fff',
+        'padding:8px 16px',
+        'border-radius:8px',
+        'z-index:30',
+        'font-size:12px',
+        'font-family:system-ui,sans-serif',
+        'max-width:80%',
+        'box-shadow:0 2px 8px rgba(0,0,0,0.3)',
+        'pointer-events:none',
+    ].join(';');
+    banner.textContent = 'Tab View: ' + (message || 'failed to load');
+    player.appendChild(banner);
+    _tvErrorBannerTimeout = setTimeout(_tvRemoveErrorBanner, 6000);
+}
+
+function _tvRemoveErrorBanner() {
+    const existing = document.getElementById('tabview-error-banner');
+    if (existing) existing.remove();
+    if (_tvErrorBannerTimeout) {
+        clearTimeout(_tvErrorBannerTimeout);
+        _tvErrorBannerTimeout = null;
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// alphaTab init
+// ═══════════════════════════════════════════════════════════════════════
+
+async function _tvInitAlphaTab(arrayBuffer, myToken) {
     const c = _tvCreateContainer();
+    if (!c) return;
     const el = document.getElementById('tabview-at');
 
-    // Destroy previous
+    // Destroy previous API before re-init so scoreLoaded / error
+    // handlers from the old lifetime don't fire into stale DOM.
     if (_tvApi) {
         try { _tvApi.destroy(); } catch (_) {}
         _tvApi = null;
     }
     _tvReady = false;
-    el.innerHTML = '';
-
-    // Show loading
-    const ov = document.getElementById('tabview-loading');
-    if (ov) ov.style.display = 'flex';
+    if (el) el.innerHTML = '';
 
     _tvApi = new alphaTab.AlphaTabApi(el, {
         core: {
-            fontDirectory: 'https://cdn.jsdelivr.net/npm/@coderline/alphatab@latest/dist/font/',
+            fontDirectory: ALPHATAB_CDN_BASE + '/font/',
         },
         display: {
             layoutMode: alphaTab.LayoutMode.Page,
@@ -110,51 +227,182 @@ async function _tvInit(arrayBuffer) {
         player: {
             enablePlayer: true,
             enableCursor: true,
-            soundFont: 'https://cdn.jsdelivr.net/npm/@coderline/alphatab@latest/dist/soundfont/sonivox.sf2',
+            soundFont: ALPHATAB_CDN_BASE + '/soundfont/sonivox.sf2',
         },
     });
 
-    // Mute alphaTab audio once score is loaded
+    // Mute alphaTab's internal audio once a score is loaded — we
+    // drive playback from slopsmith's <audio> element; alphaTab is
+    // just a visual surface here.
     _tvApi.scoreLoaded.on(function (score) {
+        if (_tvInitToken !== myToken) return;
         if (score && score.tracks) {
             try { _tvApi.changeTrackMute(score.tracks, true); } catch (_) {}
         }
     });
 
     _tvApi.renderFinished.on(function () {
+        if (_tvInitToken !== myToken) return;
         _tvReady = true;
-        const ov2 = document.getElementById('tabview-loading');
-        if (ov2) ov2.style.display = 'none';
+        // Swap visibility only once alphaTab has actually produced
+        // output. _tvApi.load() kicks off rendering synchronously
+        // but the first frame lands several rAFs later; if we hid
+        // the highway in _tvFetchAndInit right after load() returned
+        // (the previous behaviour) the player flashed blank for
+        // the duration of the render, or stayed blank forever if
+        // renderFinished never fired. Doing it here guarantees a
+        // painted-to-painted handoff and lets the error path below
+        // fall back to the still-visible 2D highway.
+        if (_tvContainer) _tvContainer.style.display = '';
+        if (_tvHighwayCanvas) _tvHighwayCanvas.style.visibility = 'hidden';
+        _tvFailedFile = null;
+        _tvFailedArr = null;
+        // A successful render supersedes any prior error banner.
+        _tvRemoveErrorBanner();
     });
 
     _tvApi.error.on(function (e) {
+        if (_tvInitToken !== myToken) return;
         console.error('[TabView] alphaTab error:', e);
+        // Render or parse error after GP5 fetch succeeded: tabview
+        // can't display anything for this target. Mark it failed so
+        // draw()'s change-detection doesn't re-fetch on every rAF,
+        // hide our (possibly empty) overlay, and restore highway
+        // visibility so the player isn't stranded blank. Use
+        // _tvCurrentFile/Arr if set (post-fetch) else fall back to
+        // the in-flight _tvLoadingFile/Arr so we always remember
+        // what went wrong.
+        const failedFile = _tvCurrentFile || _tvLoadingFile;
+        const failedArr = _tvCurrentArr != null ? _tvCurrentArr : _tvLoadingArr;
+        _tvReady = false;
+        _tvCurrentFile = null;
+        _tvCurrentArr = null;
+        if (failedFile != null) {
+            _tvFailedFile = failedFile;
+            _tvFailedArr = failedArr;
+        }
+        if (_tvContainer) _tvContainer.style.display = 'none';
+        if (_tvHighwayCanvas) _tvHighwayCanvas.style.visibility = _tvPrevVisibility || '';
+        const msg = (e && e.message) ? e.message : (typeof e === 'string' ? e : 'render failed');
+        _tvShowErrorBanner(msg);
     });
 
-    // Load GP5 data
     _tvApi.load(new Uint8Array(arrayBuffer));
 }
 
-// ── Cursor sync ─────────────────────────────────────────────────────────
+async function _tvFetchAndInit(filename, arrIdx, myToken) {
+    if (!filename) {
+        console.warn('[TabView] no filename known yet; skipping fetch');
+        return;
+    }
+    _tvLoadingFile = filename;
+    _tvLoadingArr = arrIdx;
+    try {
+        await _tvLoadScript();
+        if (_tvInitToken !== myToken) return;
+
+        // Decode first — filename may already be URI-encoded from
+        // the data-play attribute — then re-encode for the request
+        // path. decodeURIComponent throws URIError on stray % or
+        // bare `%xx` where xx isn't valid hex; fall back to the raw
+        // filename so a rare encoding edge case doesn't land in the
+        // (_tvFailedFile, _tvFailedArr) cache and permanently block
+        // retries for that song / arrangement.
+        let decoded = filename;
+        try {
+            decoded = decodeURIComponent(filename);
+        } catch (e) {
+            console.warn('[TabView] decodeURIComponent failed; using raw filename:', filename, e);
+        }
+        const url = '/api/plugins/tabview/gp5/' + encodeURIComponent(decoded) +
+            '?arrangement=' + arrIdx;
+        const resp = await fetch(url);
+        if (_tvInitToken !== myToken) return;
+        if (!resp.ok) throw new Error(await resp.text());
+        const data = await resp.arrayBuffer();
+        if (_tvInitToken !== myToken) return;
+
+        // _tvCreateContainer returns null when #player isn't in the
+        // DOM (player screen closed, unusual timing during screen
+        // transitions). Without this guard the next line's
+        // _tvContainer.style.display = '' would throw on null and
+        // the failure path below would cache this as a permanent
+        // failure for the song, even though the real issue is
+        // transient DOM state.
+        const container = _tvCreateContainer();
+        if (!container) {
+            console.warn('[TabView] #player container missing; leaving highway visible');
+            if (_tvHighwayCanvas) _tvHighwayCanvas.style.visibility = _tvPrevVisibility || '';
+            return;
+        }
+        _tvSizeContainer();
+        await _tvInitAlphaTab(data, myToken);
+
+        if (_tvInitToken !== myToken) return;
+        _tvCurrentFile = filename;
+        _tvCurrentArr = arrIdx;
+        // DO NOT show the container or hide the highway here:
+        // _tvApi.load() inside _tvInitAlphaTab kicks off rendering
+        // but resolves before the first frame is painted, so doing
+        // the visibility swap at this point would flash the player
+        // blank during the render setup (or forever if render never
+        // completes). The renderFinished handler inside
+        // _tvInitAlphaTab takes over: on success it swaps in the
+        // overlay, on error it keeps the highway visible.
+        // _tvFailedFile/_tvFailedArr likewise stay as-is until
+        // renderFinished clears them.
+    } catch (e) {
+        if (_tvInitToken !== myToken) return;
+        console.error('[TabView] GP5 fetch/init failed:', e);
+        // Remember the failed target so draw()'s change-detection
+        // doesn't kick off a new fetch on the next rAF frame.
+        _tvFailedFile = filename;
+        _tvFailedArr = arrIdx;
+        // Hide any stale tab overlay (either a prior successful load
+        // that's being reloaded into a failing song, or the freshly
+        // created empty container from an initial failed load) so
+        // the highway fallback actually becomes visible.
+        if (_tvContainer) _tvContainer.style.display = 'none';
+        // On failure leave the 2D highway visible so the user isn't
+        // stranded on a blank player. They can switch viz to recover;
+        // if they re-pick Tab View and the problem persists the same
+        // error surfaces again.
+        if (_tvHighwayCanvas) _tvHighwayCanvas.style.visibility = _tvPrevVisibility || '';
+        const msg = (e && e.message) ? e.message : String(e);
+        console.warn('[TabView] ' + msg);
+        _tvShowErrorBanner(msg);
+    } finally {
+        // Only clear the loading-target if this fetch is still the
+        // latest in-flight one — a newer token bump already cleared /
+        // re-set these fields for a subsequent fetch.
+        if (_tvInitToken === myToken) {
+            _tvLoadingFile = null;
+            _tvLoadingArr = null;
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Cursor sync
+// ═══════════════════════════════════════════════════════════════════════
 
 function _tvTimeToTick(seconds) {
-    var beats = highway.getBeats();
+    const beats = typeof highway !== 'undefined' && typeof highway.getBeats === 'function'
+        ? highway.getBeats() : null;
     if (!beats || beats.length < 2) return 960;
 
-    // Before first beat
     if (seconds < beats[0].time) return 960;
 
-    // Find containing beat interval
-    var idx = 0;
-    for (var i = 0; i < beats.length - 1; i++) {
+    let idx = 0;
+    for (let i = 0; i < beats.length - 1; i++) {
         if (seconds >= beats[i].time) idx = i;
         else break;
     }
 
-    var frac = 0;
+    let frac = 0;
     if (idx < beats.length - 1) {
-        var bStart = beats[idx].time;
-        var bEnd = beats[idx + 1].time;
+        const bStart = beats[idx].time;
+        const bEnd = beats[idx + 1].time;
         if (bEnd > bStart) {
             frac = Math.min(1, Math.max(0, (seconds - bStart) / (bEnd - bStart)));
         }
@@ -163,50 +411,33 @@ function _tvTimeToTick(seconds) {
     return 960 + Math.round((idx + frac) * 960);
 }
 
-function _tvStartSync() {
-    if (_tvSyncRAF) return;
-    var lastTick = -1;
-    var audio = document.getElementById('audio');
-    var hl = document.getElementById('tabview-highlight');
-    if (hl) hl.style.display = '';
+function _tvSyncCursor(currentTime) {
+    if (!_tvApi || !_tvReady) return;
 
-    function loop() {
-        _tvSyncRAF = requestAnimationFrame(loop);
-        if (!_tvApi || !_tvActive || !_tvReady) return;
-
-        var tick = _tvTimeToTick(audio.currentTime);
-        if (Math.abs(tick - lastTick) > 30) {
-            lastTick = tick;
-            try { _tvApi.tickPosition = tick; } catch (_) {}
-        }
-
-        _tvUpdateHighlight();
+    const tick = _tvTimeToTick(currentTime);
+    if (Math.abs(tick - _tvLastTick) > 30) {
+        _tvLastTick = tick;
+        try { _tvApi.tickPosition = tick; } catch (_) {}
     }
-    loop();
+
+    _tvUpdateHighlight();
 }
 
-function _tvStopSync() {
-    if (_tvSyncRAF) {
-        cancelAnimationFrame(_tvSyncRAF);
-        _tvSyncRAF = null;
-    }
-    var hl = document.getElementById('tabview-highlight');
-    if (hl) hl.style.display = 'none';
-}
-
-// ── Yellow highlight bar ────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════
+// Cursor highlight bar
+// ═══════════════════════════════════════════════════════════════════════
 
 function _tvFindCursorRect() {
-    var host = document.getElementById('tabview-at');
+    const host = document.getElementById('tabview-at');
     if (!host) return null;
-    var selectors = ['.at-cursor-beat', '.at-cursor-bar', '.at-cursor', '[class*="cursor"]'];
-    var roots = [host];
+    const selectors = ['.at-cursor-beat', '.at-cursor-bar', '.at-cursor', '[class*="cursor"]'];
+    const roots = [host];
     if (host.shadowRoot) roots.push(host.shadowRoot);
-    for (var r = 0; r < roots.length; r++) {
-        for (var s = 0; s < selectors.length; s++) {
-            var nodes = roots[r].querySelectorAll(selectors[s]);
-            for (var n = 0; n < nodes.length; n++) {
-                var rect = nodes[n].getBoundingClientRect();
+    for (let r = 0; r < roots.length; r++) {
+        for (let s = 0; s < selectors.length; s++) {
+            const nodes = roots[r].querySelectorAll(selectors[s]);
+            for (let n = 0; n < nodes.length; n++) {
+                const rect = nodes[n].getBoundingClientRect();
                 if (rect.width > 0 && rect.height > 0) return rect;
             }
         }
@@ -215,16 +446,16 @@ function _tvFindCursorRect() {
 }
 
 function _tvUpdateHighlight() {
-    var hl = document.getElementById('tabview-highlight');
+    const hl = document.getElementById('tabview-highlight');
     if (!hl || !_tvContainer) return;
 
-    var cursorRect = _tvFindCursorRect();
+    const cursorRect = _tvFindCursorRect();
     if (!cursorRect) { hl.style.display = 'none'; return; }
 
-    var wrapRect = _tvContainer.getBoundingClientRect();
-    var size = Math.max(18, Math.min(36, Math.round(Math.max(cursorRect.width, cursorRect.height, 20))));
-    var x = cursorRect.left - wrapRect.left + _tvContainer.scrollLeft + (cursorRect.width - size) / 2;
-    var y = cursorRect.top - wrapRect.top + _tvContainer.scrollTop + (cursorRect.height - size) / 2;
+    const wrapRect = _tvContainer.getBoundingClientRect();
+    const size = Math.max(18, Math.min(36, Math.round(Math.max(cursorRect.width, cursorRect.height, 20))));
+    const x = cursorRect.left - wrapRect.left + _tvContainer.scrollLeft + (cursorRect.width - size) / 2;
+    const y = cursorRect.top - wrapRect.top + _tvContainer.scrollTop + (cursorRect.height - size) / 2;
 
     hl.style.left = Math.round(x) + 'px';
     hl.style.top = Math.round(y) + 'px';
@@ -233,15 +464,15 @@ function _tvUpdateHighlight() {
     hl.style.display = '';
 
     // Auto-scroll to keep cursor visible
-    var paddingX = Math.min(180, wrapRect.width * 0.3);
-    var paddingY = Math.min(100, wrapRect.height * 0.25);
+    const paddingX = Math.min(180, wrapRect.width * 0.3);
+    const paddingY = Math.min(100, wrapRect.height * 0.25);
 
-    var relX = cursorRect.left - wrapRect.left;
-    var relY = cursorRect.top - wrapRect.top;
+    const relX = cursorRect.left - wrapRect.left;
+    const relY = cursorRect.top - wrapRect.top;
 
-    var needScroll = false;
-    var targetX = _tvContainer.scrollLeft;
-    var targetY = _tvContainer.scrollTop;
+    let needScroll = false;
+    let targetX = _tvContainer.scrollLeft;
+    let targetY = _tvContainer.scrollTop;
 
     if (relX < paddingX || relX > wrapRect.width - paddingX) {
         targetX = x - wrapRect.width / 2;
@@ -257,169 +488,160 @@ function _tvUpdateHighlight() {
     }
 }
 
-// ── Toggle tab view ─────────────────────────────────────────────────────
-
-async function _tvToggle() {
-    if (_tvActive) {
-        // Back to highway
-        _tvActive = false;
-        _tvStopSync();
-        if (_tvContainer) _tvContainer.style.display = 'none';
-        document.getElementById('highway').style.visibility = '';
-        _tvUpdateButton();
-        return;
-    }
-
-    var beats = highway.getBeats();
-    if (!beats || beats.length < 2) {
-        // Song data not loaded yet
-        return;
-    }
-
-    var btn = document.getElementById('btn-tabview');
-    if (btn) btn.textContent = 'Loading\u2026';
-
-    try {
-        await _tvLoadScript();
-
-        // Fetch GP5
-        var filename = _tvFilename;
-        var arrSel = document.getElementById('arr-select');
-        var arrIdx = arrSel ? arrSel.value : 0;
-        // filename may already be encoded from data-play attributes — decode first
-        var decoded = decodeURIComponent(filename);
-        var url = '/api/plugins/tabview/gp5/' + encodeURIComponent(decoded) + '?arrangement=' + arrIdx;
-        var resp = await fetch(url);
-        if (!resp.ok) throw new Error(await resp.text());
-        var data = await resp.arrayBuffer();
-
-        // Init alphaTab
-        _tvCreateContainer();
-        _tvSizeContainer();
-        await _tvInit(data);
-
-        // Show tab, hide highway
-        _tvActive = true;
-        document.getElementById('highway').style.visibility = 'hidden';
-        _tvContainer.style.display = '';
-
-        _tvCurrentFile = filename;
-        _tvCurrentArr = arrIdx;
-        _tvStartSync();
-    } catch (e) {
-        console.error('[TabView]', e);
-        alert('Tab View error: ' + e.message);
-    }
-
-    _tvUpdateButton();
-}
-
-// ── Dark mode ───────────────────────────────────────────────────────────
-
-function _tvApplyTheme(dark) {
-    if (!_tvContainer) return;
-    var at = document.getElementById('tabview-at');
-    _tvContainer.style.background = dark ? '#000' : '#fff';
-    if (at) at.style.filter = dark ? 'invert(1)' : '';
-}
-
-function _tvToggleDark() {
-    _tvDark = !_tvDark;
-    _tvApplyTheme(_tvDark);
-    _tvUpdateDarkButton();
-}
-
-function _tvUpdateDarkButton() {
-    var btn = document.getElementById('btn-tabview-dark');
-    if (!btn) return;
-    if (_tvDark) {
-        btn.textContent = 'Light';
-        btn.className = 'px-3 py-1.5 bg-blue-900/50 rounded-lg text-xs text-blue-300 transition';
-    } else {
-        btn.textContent = 'Dark';
-        btn.className = 'px-3 py-1.5 bg-dark-600 hover:bg-dark-500 rounded-lg text-xs text-gray-500 transition';
-    }
-}
-
-// ── Button ──────────────────────────────────────────────────────────────
-
-function _tvUpdateButton() {
-    var btn = document.getElementById('btn-tabview');
-    var darkBtn = document.getElementById('btn-tabview-dark');
-    if (!btn) return;
-    if (_tvActive) {
-        btn.textContent = 'Highway';
-        btn.className = 'px-3 py-1.5 bg-blue-900/50 rounded-lg text-xs text-blue-300 transition';
-        if (darkBtn) darkBtn.style.display = '';
-    } else {
-        btn.textContent = 'Tab View';
-        btn.className = 'px-3 py-1.5 bg-dark-600 hover:bg-dark-500 rounded-lg text-xs text-gray-500 transition';
-        if (darkBtn) darkBtn.style.display = 'none';
-    }
-}
-
-function _tvInjectButton() {
-    var controls = document.getElementById('player-controls');
-    if (!controls || document.getElementById('btn-tabview')) return;
-
-    var lyricsBtn = document.getElementById('btn-lyrics');
-    var sep = lyricsBtn ? lyricsBtn.nextElementSibling : null;
-    var insertBefore = sep || lyricsBtn ? lyricsBtn.nextSibling : null;
-
-    var btn = document.createElement('button');
-    btn.id = 'btn-tabview';
-    btn.className = 'px-3 py-1.5 bg-dark-600 hover:bg-dark-500 rounded-lg text-xs text-gray-500 transition';
-    btn.textContent = 'Tab View';
-    btn.title = 'Toggle tablature notation view';
-    btn.onclick = _tvToggle;
-    controls.insertBefore(btn, insertBefore);
-
-    var darkBtn = document.createElement('button');
-    darkBtn.id = 'btn-tabview-dark';
-    darkBtn.className = 'px-3 py-1.5 bg-dark-600 hover:bg-dark-500 rounded-lg text-xs text-gray-500 transition';
-    darkBtn.textContent = 'Dark';
-    darkBtn.title = 'Toggle dark mode for tablature';
-    darkBtn.style.display = 'none';
-    darkBtn.onclick = _tvToggleDark;
-    controls.insertBefore(darkBtn, btn.nextSibling);
-}
-
-// ── Teardown ────────────────────────────────────────────────────────────
-
-function _tvReset() {
-    _tvActive = false;
-    _tvStopSync();
-    if (_tvContainer) _tvContainer.style.display = 'none';
-    if (_tvApi) {
-        try { _tvApi.destroy(); } catch (_) {}
-        _tvApi = null;
-    }
-    _tvReady = false;
-    document.getElementById('highway').style.visibility = '';
-}
-
-// ── Hooks ───────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════
+// Filename tracking
+// ═══════════════════════════════════════════════════════════════════════
+//
+// slopsmith core doesn't expose the current song's filename via a
+// getter (song_info carries metadata, not the WS URL). Capture it
+// ourselves by wrapping window.playSong once at module load and
+// subscribing to arrangement:changed. init() consumes the cached
+// _tvFilename on selection.
 
 (function () {
-    // Hook playSong
-    var origPlay = window.playSong;
-    window.playSong = async function (filename, arrangement) {
-        _tvFilename = filename;
-        _tvReset();
-        await origPlay(filename, arrangement);
-        _tvInjectButton();
-    };
-
-    // Hook changeArrangement
-    var origArr = window.changeArrangement;
-    if (origArr) {
-        window.changeArrangement = function (index) {
-            if (_tvActive) _tvReset();
-            _tvUpdateButton();
-            origArr(index);
+    const origPlay = typeof window.playSong === 'function' ? window.playSong : null;
+    if (origPlay) {
+        window.playSong = async function (filename, arrangement) {
+            _tvFilename = filename;
+            return origPlay.call(this, filename, arrangement);
         };
     }
 
-    // Re-size tab container when window resizes
+    if (window.slopsmith && typeof window.slopsmith.on === 'function') {
+        window.slopsmith.on('arrangement:changed', (e) => {
+            // detail = { index, filename }
+            if (e && e.detail && e.detail.filename) _tvFilename = e.detail.filename;
+        });
+    }
+
+    // Re-measure the container when the window resizes — cheap and
+    // safe whether or not tabview is currently selected.
     window.addEventListener('resize', _tvSizeContainer);
+})();
+
+// ═══════════════════════════════════════════════════════════════════════
+// Factory — slopsmith#36 setRenderer contract
+// ═══════════════════════════════════════════════════════════════════════
+
+function createFactory() {
+    let _isReady = false;
+
+    // Declared before the returned object so readers see the full
+    // lifecycle surface without paging past `return`. Function
+    // hoisting meant the prior layout worked, but tooling warnings
+    // and reader ergonomics both prefer structural-before-return.
+    function _teardown(restoreCanvas) {
+        _tvReady = false;
+        _tvLastTick = -1;
+        _tvCurrentFile = null;
+        _tvCurrentArr = null;
+        _tvLoadingFile = null;
+        _tvLoadingArr = null;
+        _tvFailedFile = null;
+        _tvFailedArr = null;
+        if (_tvApi) {
+            try { _tvApi.destroy(); } catch (_) {}
+            _tvApi = null;
+        }
+        _tvRemoveContainer();
+        _tvRemoveErrorBanner();
+        if (restoreCanvas && _tvHighwayCanvas) {
+            _tvHighwayCanvas.style.visibility = _tvPrevVisibility;
+            _tvHighwayCanvas = null;
+            _tvPrevVisibility = '';
+        }
+    }
+
+    return {
+        init(canvas, bundle) {
+            // Always run teardown at init start, even when there's
+            // no visible container/API to tear down. A previous
+            // activation that failed BEFORE alphaTab initialised
+            // (e.g. CDN load error, fetch error pre-container) would
+            // otherwise leak _tvFailedFile / _tvFailedArr into this
+            // lifetime — the new fetch would hit the previouslyFailed
+            // guard in draw() and silently skip, so re-picking Tab
+            // View would appear to do nothing. _teardown is cheap on
+            // already-null state.
+            _teardown(/* restoreCanvas */ false);
+
+            const myToken = ++_tvInitToken;
+            _tvHighwayCanvas = canvas;
+            _tvPrevVisibility = canvas ? canvas.style.visibility : '';
+
+            // DON'T hide the 2D highway yet — if GP5 fetch, CDN load,
+            // or alphaTab init fails (missing filename, server down,
+            // network error), we want the default visible as a
+            // fallback so the player isn't stranded blank. The hide
+            // happens inside _tvFetchAndInit on success, and a failed
+            // fetch restores _tvPrevVisibility explicitly.
+
+            _tvLastTick = -1;
+
+            const songInfo = (bundle && bundle.songInfo) || {};
+            const filename = (typeof songInfo.filename === 'string' && songInfo.filename)
+                || _tvFilename;
+            const arrIdx = Number.isInteger(songInfo.arrangement_index)
+                ? songInfo.arrangement_index : 0;
+            _tvFetchAndInit(filename, arrIdx, myToken);
+
+            _isReady = true;
+        },
+        draw(bundle) {
+            if (!_isReady || !bundle) return;
+
+            // Detect arrangement / song change: re-fetch GP5 when the
+            // active (filename, arrangement_index) differs from the
+            // one the currently-displayed score was loaded for. Guard
+            // against per-frame retry loops — while a fetch is in
+            // flight for the same target, skip. draw() runs every rAF
+            // and a typical fetch takes well over one frame; without
+            // this check we'd spam the endpoint and keep bumping the
+            // init token, invalidating each request before it lands.
+            //
+            // Prefer bundle.songInfo.filename when present and fall
+            // back to the _tvFilename cache from our playSong wrap.
+            // slopsmith core doesn't expose filename in song_info
+            // today, but routing through bundle first means we pick
+            // it up automatically when/if core adds it, and it
+            // eliminates the small race where _tvFilename lags
+            // bundle.songInfo during a rapid song switch.
+            const songInfo = bundle.songInfo || {};
+            const filename = (typeof songInfo.filename === 'string' && songInfo.filename)
+                || _tvFilename;
+            const arrIdx = Number.isInteger(songInfo.arrangement_index)
+                ? songInfo.arrangement_index : 0;
+            const chartChanged = filename &&
+                (filename !== _tvCurrentFile || arrIdx !== _tvCurrentArr);
+            const loadInFlight = _tvLoadingFile !== null &&
+                _tvLoadingFile === filename && _tvLoadingArr === arrIdx;
+            const previouslyFailed = _tvFailedFile === filename &&
+                _tvFailedArr === arrIdx;
+            if (chartChanged && !loadInFlight && !previouslyFailed) {
+                const myToken = ++_tvInitToken;
+                _tvLastTick = -1;
+                _tvFetchAndInit(filename, arrIdx, myToken);
+                // fall through — cursor sync below will be a no-op
+                // until _tvReady flips true again after the re-init.
+            }
+
+            _tvSyncCursor(bundle.currentTime);
+        },
+        resize(/* w, h */) {
+            if (!_isReady) return;
+            _tvSizeContainer();
+        },
+        destroy() {
+            _isReady = false;
+            _tvInitToken++;  // invalidate in-flight fetches
+            _teardown(/* restoreCanvas */ true);
+        },
+    };
+}
+
+// Arrangement-agnostic — Auto mode should not auto-select tabview.
+// (The static matchesArrangement is intentionally absent.)
+
+window.slopsmithViz_tabview = createFactory;
+
 })();
