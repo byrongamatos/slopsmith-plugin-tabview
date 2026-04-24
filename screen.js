@@ -192,10 +192,43 @@ async function _tvInitAlphaTab(arrayBuffer, myToken) {
         _tvReady = true;
         const ov2 = document.getElementById('tabview-loading');
         if (ov2) ov2.style.display = 'none';
+        // Swap visibility only once alphaTab has actually produced
+        // output. _tvApi.load() kicks off rendering synchronously
+        // but the first frame lands several rAFs later; if we hid
+        // the highway in _tvFetchAndInit right after load() returned
+        // (the previous behaviour) the player flashed blank for
+        // the duration of the render, or stayed blank forever if
+        // renderFinished never fired. Doing it here guarantees a
+        // painted-to-painted handoff and lets the error path below
+        // fall back to the still-visible 2D highway.
+        if (_tvContainer) _tvContainer.style.display = '';
+        if (_tvHighwayCanvas) _tvHighwayCanvas.style.visibility = 'hidden';
+        _tvFailedFile = null;
+        _tvFailedArr = null;
     });
 
     _tvApi.error.on(function (e) {
+        if (_tvInitToken !== myToken) return;
         console.error('[TabView] alphaTab error:', e);
+        // Render or parse error after GP5 fetch succeeded: tabview
+        // can't display anything for this target. Mark it failed so
+        // draw()'s change-detection doesn't re-fetch on every rAF,
+        // hide our (possibly empty) overlay, and restore highway
+        // visibility so the player isn't stranded blank. Use
+        // _tvCurrentFile/Arr if set (post-fetch) else fall back to
+        // the in-flight _tvLoadingFile/Arr so we always remember
+        // what went wrong.
+        const failedFile = _tvCurrentFile || _tvLoadingFile;
+        const failedArr = _tvCurrentArr != null ? _tvCurrentArr : _tvLoadingArr;
+        _tvReady = false;
+        _tvCurrentFile = null;
+        _tvCurrentArr = null;
+        if (failedFile != null) {
+            _tvFailedFile = failedFile;
+            _tvFailedArr = failedArr;
+        }
+        if (_tvContainer) _tvContainer.style.display = 'none';
+        if (_tvHighwayCanvas) _tvHighwayCanvas.style.visibility = _tvPrevVisibility || '';
     });
 
     _tvApi.load(new Uint8Array(arrayBuffer));
@@ -250,14 +283,18 @@ async function _tvFetchAndInit(filename, arrIdx, myToken) {
         await _tvInitAlphaTab(data, myToken);
 
         if (_tvInitToken !== myToken) return;
-        container.style.display = '';
         _tvCurrentFile = filename;
         _tvCurrentArr = arrIdx;
-        _tvFailedFile = null;
-        _tvFailedArr = null;
-        // Now that alphaTab is up, the 2D highway is safe to hide —
-        // see init() for why we defer this instead of hiding eagerly.
-        if (_tvHighwayCanvas) _tvHighwayCanvas.style.visibility = 'hidden';
+        // DO NOT show the container or hide the highway here:
+        // _tvApi.load() inside _tvInitAlphaTab kicks off rendering
+        // but resolves before the first frame is painted, so doing
+        // the visibility swap at this point would flash the player
+        // blank during the render setup (or forever if render never
+        // completes). The renderFinished handler inside
+        // _tvInitAlphaTab takes over: on success it swaps in the
+        // overlay, on error it keeps the highway visible.
+        // _tvFailedFile/_tvFailedArr likewise stay as-is until
+        // renderFinished clears them.
     } catch (e) {
         if (_tvInitToken !== myToken) return;
         console.error('[TabView] GP5 fetch/init failed:', e);
