@@ -41,6 +41,11 @@ let _tvLastTick = -1;
 // since. Guards against a rapid arrangement switch where a pending
 // fetch would otherwise install stale GP5 bytes over the new one.
 let _tvInitToken = 0;
+// Auto-dismiss timer handle for the fetch/render error banner.
+// Tracked so _tvRemoveErrorBanner can cancel a pending dismissal
+// when a new banner preempts the previous one (or when destroy
+// tears everything down).
+let _tvErrorBannerTimeout = null;
 
 // ═══════════════════════════════════════════════════════════════════════
 // alphaTab CDN loader (memoized — one load per page)
@@ -144,6 +149,56 @@ function _tvRemoveContainer() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// Error banner — surfaces fetch / render failures without swallowing
+// the highway fallback
+// ═══════════════════════════════════════════════════════════════════════
+//
+// When the GP5 fetch or alphaTab render fails, we hide the tabview
+// container so the 2D highway stays visible. That alone leaves the
+// failure silent to anyone who can't open devtools. A small,
+// auto-dismissing banner anchored to the top of #player surfaces the
+// error without covering the highway — living OUTSIDE the tabview
+// container so it coexists with the fallback renderer instead of
+// occluding it.
+
+function _tvShowErrorBanner(message) {
+    _tvRemoveErrorBanner();
+    const player = document.getElementById('player');
+    if (!player) return;
+    const banner = document.createElement('div');
+    banner.id = 'tabview-error-banner';
+    banner.setAttribute('role', 'alert');
+    banner.style.cssText = [
+        'position:absolute',
+        'top:10px',
+        'left:50%',
+        'transform:translateX(-50%)',
+        'background:rgba(220,80,80,0.94)',
+        'color:#fff',
+        'padding:8px 16px',
+        'border-radius:8px',
+        'z-index:30',
+        'font-size:12px',
+        'font-family:system-ui,sans-serif',
+        'max-width:80%',
+        'box-shadow:0 2px 8px rgba(0,0,0,0.3)',
+        'pointer-events:none',
+    ].join(';');
+    banner.textContent = 'Tab View: ' + (message || 'failed to load');
+    player.appendChild(banner);
+    _tvErrorBannerTimeout = setTimeout(_tvRemoveErrorBanner, 6000);
+}
+
+function _tvRemoveErrorBanner() {
+    const existing = document.getElementById('tabview-error-banner');
+    if (existing) existing.remove();
+    if (_tvErrorBannerTimeout) {
+        clearTimeout(_tvErrorBannerTimeout);
+        _tvErrorBannerTimeout = null;
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // alphaTab init
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -202,6 +257,8 @@ async function _tvInitAlphaTab(arrayBuffer, myToken) {
         if (_tvHighwayCanvas) _tvHighwayCanvas.style.visibility = 'hidden';
         _tvFailedFile = null;
         _tvFailedArr = null;
+        // A successful render supersedes any prior error banner.
+        _tvRemoveErrorBanner();
     });
 
     _tvApi.error.on(function (e) {
@@ -226,6 +283,8 @@ async function _tvInitAlphaTab(arrayBuffer, myToken) {
         }
         if (_tvContainer) _tvContainer.style.display = 'none';
         if (_tvHighwayCanvas) _tvHighwayCanvas.style.visibility = _tvPrevVisibility || '';
+        const msg = (e && e.message) ? e.message : (typeof e === 'string' ? e : 'render failed');
+        _tvShowErrorBanner(msg);
     });
 
     _tvApi.load(new Uint8Array(arrayBuffer));
@@ -309,7 +368,9 @@ async function _tvFetchAndInit(filename, arrIdx, myToken) {
         // if they re-pick Tab View and the problem persists the same
         // error surfaces again.
         if (_tvHighwayCanvas) _tvHighwayCanvas.style.visibility = _tvPrevVisibility || '';
-        console.warn('[TabView] ' + (e && e.message ? e.message : e));
+        const msg = (e && e.message) ? e.message : String(e);
+        console.warn('[TabView] ' + msg);
+        _tvShowErrorBanner(msg);
     } finally {
         // Only clear the loading-target if this fetch is still the
         // latest in-flight one — a newer token bump already cleared /
@@ -483,6 +544,7 @@ function createFactory() {
             _tvApi = null;
         }
         _tvRemoveContainer();
+        _tvRemoveErrorBanner();
         if (restoreCanvas && _tvHighwayCanvas) {
             _tvHighwayCanvas.style.visibility = _tvPrevVisibility;
             _tvHighwayCanvas = null;
@@ -517,9 +579,11 @@ function createFactory() {
             _tvLastTick = -1;
 
             const songInfo = (bundle && bundle.songInfo) || {};
+            const filename = (typeof songInfo.filename === 'string' && songInfo.filename)
+                || _tvFilename;
             const arrIdx = Number.isInteger(songInfo.arrangement_index)
                 ? songInfo.arrangement_index : 0;
-            _tvFetchAndInit(_tvFilename, arrIdx, myToken);
+            _tvFetchAndInit(filename, arrIdx, myToken);
 
             _isReady = true;
         },
@@ -534,19 +598,29 @@ function createFactory() {
             // and a typical fetch takes well over one frame; without
             // this check we'd spam the endpoint and keep bumping the
             // init token, invalidating each request before it lands.
+            //
+            // Prefer bundle.songInfo.filename when present and fall
+            // back to the _tvFilename cache from our playSong wrap.
+            // slopsmith core doesn't expose filename in song_info
+            // today, but routing through bundle first means we pick
+            // it up automatically when/if core adds it, and it
+            // eliminates the small race where _tvFilename lags
+            // bundle.songInfo during a rapid song switch.
             const songInfo = bundle.songInfo || {};
+            const filename = (typeof songInfo.filename === 'string' && songInfo.filename)
+                || _tvFilename;
             const arrIdx = Number.isInteger(songInfo.arrangement_index)
                 ? songInfo.arrangement_index : 0;
-            const chartChanged = _tvFilename &&
-                (_tvFilename !== _tvCurrentFile || arrIdx !== _tvCurrentArr);
+            const chartChanged = filename &&
+                (filename !== _tvCurrentFile || arrIdx !== _tvCurrentArr);
             const loadInFlight = _tvLoadingFile !== null &&
-                _tvLoadingFile === _tvFilename && _tvLoadingArr === arrIdx;
-            const previouslyFailed = _tvFailedFile === _tvFilename &&
+                _tvLoadingFile === filename && _tvLoadingArr === arrIdx;
+            const previouslyFailed = _tvFailedFile === filename &&
                 _tvFailedArr === arrIdx;
             if (chartChanged && !loadInFlight && !previouslyFailed) {
                 const myToken = ++_tvInitToken;
                 _tvLastTick = -1;
-                _tvFetchAndInit(_tvFilename, arrIdx, myToken);
+                _tvFetchAndInit(filename, arrIdx, myToken);
                 // fall through — cursor sync below will be a no-op
                 // until _tvReady flips true again after the re-init.
             }
