@@ -46,13 +46,20 @@ let _tvInitToken = 0;
 // alphaTab CDN loader (memoized — one load per page)
 // ═══════════════════════════════════════════════════════════════════════
 
+// Pin alphaTab to a specific release so new jsDelivr cache invalidations
+// or upstream breaking changes can't land silently in production. Bump
+// this when the alphaTab CDN publishes a version tested against the
+// cursor-sync / tab-highlight behavior below.
+const ALPHATAB_VERSION = '1.8.2';
+const ALPHATAB_CDN_BASE = 'https://cdn.jsdelivr.net/npm/@coderline/alphatab@' + ALPHATAB_VERSION + '/dist';
+
 let _alphaTabLoadPromise = null;
 function _tvLoadScript() {
     if (window.alphaTab) return Promise.resolve();
     if (_alphaTabLoadPromise) return _alphaTabLoadPromise;
     _alphaTabLoadPromise = new Promise((resolve, reject) => {
         const s = document.createElement('script');
-        s.src = 'https://cdn.jsdelivr.net/npm/@coderline/alphatab@latest/dist/alphaTab.min.js';
+        s.src = ALPHATAB_CDN_BASE + '/alphaTab.min.js';
         s.onload = resolve;
         s.onerror = () => {
             _alphaTabLoadPromise = null;  // allow retry on next init
@@ -157,7 +164,7 @@ async function _tvInitAlphaTab(arrayBuffer, myToken) {
 
     _tvApi = new alphaTab.AlphaTabApi(el, {
         core: {
-            fontDirectory: 'https://cdn.jsdelivr.net/npm/@coderline/alphatab@latest/dist/font/',
+            fontDirectory: ALPHATAB_CDN_BASE + '/font/',
         },
         display: {
             layoutMode: alphaTab.LayoutMode.Page,
@@ -166,7 +173,7 @@ async function _tvInitAlphaTab(arrayBuffer, myToken) {
         player: {
             enablePlayer: true,
             enableCursor: true,
-            soundFont: 'https://cdn.jsdelivr.net/npm/@coderline/alphatab@latest/dist/soundfont/sonivox.sf2',
+            soundFont: ALPHATAB_CDN_BASE + '/soundfont/sonivox.sf2',
         },
     });
 
@@ -205,9 +212,19 @@ async function _tvFetchAndInit(filename, arrIdx, myToken) {
         await _tvLoadScript();
         if (_tvInitToken !== myToken) return;
 
-        // Decode first — filename may already be URI-encoded from the
-        // data-play attribute — then re-encode for the request path.
-        const decoded = decodeURIComponent(filename);
+        // Decode first — filename may already be URI-encoded from
+        // the data-play attribute — then re-encode for the request
+        // path. decodeURIComponent throws URIError on stray % or
+        // bare `%xx` where xx isn't valid hex; fall back to the raw
+        // filename so a rare encoding edge case doesn't land in the
+        // (_tvFailedFile, _tvFailedArr) cache and permanently block
+        // retries for that song / arrangement.
+        let decoded = filename;
+        try {
+            decoded = decodeURIComponent(filename);
+        } catch (e) {
+            console.warn('[TabView] decodeURIComponent failed; using raw filename:', filename, e);
+        }
         const url = '/api/plugins/tabview/gp5/' + encodeURIComponent(decoded) +
             '?arrangement=' + arrIdx;
         const resp = await fetch(url);
@@ -216,12 +233,24 @@ async function _tvFetchAndInit(filename, arrIdx, myToken) {
         const data = await resp.arrayBuffer();
         if (_tvInitToken !== myToken) return;
 
-        _tvCreateContainer();
+        // _tvCreateContainer returns null when #player isn't in the
+        // DOM (player screen closed, unusual timing during screen
+        // transitions). Without this guard the next line's
+        // _tvContainer.style.display = '' would throw on null and
+        // the failure path below would cache this as a permanent
+        // failure for the song, even though the real issue is
+        // transient DOM state.
+        const container = _tvCreateContainer();
+        if (!container) {
+            console.warn('[TabView] #player container missing; leaving highway visible');
+            if (_tvHighwayCanvas) _tvHighwayCanvas.style.visibility = _tvPrevVisibility || '';
+            return;
+        }
         _tvSizeContainer();
         await _tvInitAlphaTab(data, myToken);
 
         if (_tvInitToken !== myToken) return;
-        _tvContainer.style.display = '';
+        container.style.display = '';
         _tvCurrentFile = filename;
         _tvCurrentArr = arrIdx;
         _tvFailedFile = null;
@@ -402,6 +431,31 @@ function _tvUpdateHighlight() {
 function createFactory() {
     let _isReady = false;
 
+    // Declared before the returned object so readers see the full
+    // lifecycle surface without paging past `return`. Function
+    // hoisting meant the prior layout worked, but tooling warnings
+    // and reader ergonomics both prefer structural-before-return.
+    function _teardown(restoreCanvas) {
+        _tvReady = false;
+        _tvLastTick = -1;
+        _tvCurrentFile = null;
+        _tvCurrentArr = null;
+        _tvLoadingFile = null;
+        _tvLoadingArr = null;
+        _tvFailedFile = null;
+        _tvFailedArr = null;
+        if (_tvApi) {
+            try { _tvApi.destroy(); } catch (_) {}
+            _tvApi = null;
+        }
+        _tvRemoveContainer();
+        if (restoreCanvas && _tvHighwayCanvas) {
+            _tvHighwayCanvas.style.visibility = _tvPrevVisibility;
+            _tvHighwayCanvas = null;
+            _tvPrevVisibility = '';
+        }
+    }
+
     return {
         init(canvas, bundle) {
             // Defensive teardown for a misbehaving caller.
@@ -469,27 +523,6 @@ function createFactory() {
             _teardown(/* restoreCanvas */ true);
         },
     };
-
-    function _teardown(restoreCanvas) {
-        _tvReady = false;
-        _tvLastTick = -1;
-        _tvCurrentFile = null;
-        _tvCurrentArr = null;
-        _tvLoadingFile = null;
-        _tvLoadingArr = null;
-        _tvFailedFile = null;
-        _tvFailedArr = null;
-        if (_tvApi) {
-            try { _tvApi.destroy(); } catch (_) {}
-            _tvApi = null;
-        }
-        _tvRemoveContainer();
-        if (restoreCanvas && _tvHighwayCanvas) {
-            _tvHighwayCanvas.style.visibility = _tvPrevVisibility;
-            _tvHighwayCanvas = null;
-            _tvPrevVisibility = '';
-        }
-    }
 }
 
 // Arrangement-agnostic — Auto mode should not auto-select tabview.
