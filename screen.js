@@ -111,12 +111,14 @@ function _tvCreateContainer() {
     ].join(';');
     c.appendChild(hl);
 
-    // Loading overlay
-    const ov = document.createElement('div');
-    ov.id = 'tabview-loading';
-    ov.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:#fff;z-index:10;';
-    ov.innerHTML = '<span style="color:#888;font-size:14px;">Loading tablature…</span>';
-    c.appendChild(ov);
+    // (The previous "Loading tablature…" overlay was removed here:
+    // on the initial activation the container itself stayed
+    // display:none until renderFinished fired, so the overlay was
+    // never visible. Rather than showing the container-behind-
+    // highway mid-load — which would flash white behind a
+    // translucent highway canvas — we just keep the 2D highway
+    // visible through the load window. renderFinished swaps in the
+    // rendered overlay once it has actual content.)
 
     const player = document.getElementById('player');
     if (!player) return null;
@@ -159,9 +161,6 @@ async function _tvInitAlphaTab(arrayBuffer, myToken) {
     _tvReady = false;
     if (el) el.innerHTML = '';
 
-    const ov = document.getElementById('tabview-loading');
-    if (ov) ov.style.display = 'flex';
-
     _tvApi = new alphaTab.AlphaTabApi(el, {
         core: {
             fontDirectory: ALPHATAB_CDN_BASE + '/font/',
@@ -190,8 +189,6 @@ async function _tvInitAlphaTab(arrayBuffer, myToken) {
     _tvApi.renderFinished.on(function () {
         if (_tvInitToken !== myToken) return;
         _tvReady = true;
-        const ov2 = document.getElementById('tabview-loading');
-        if (ov2) ov2.style.display = 'none';
         // Swap visibility only once alphaTab has actually produced
         // output. _tvApi.load() kicks off rendering synchronously
         // but the first frame lands several rAFs later; if we hid
@@ -495,10 +492,16 @@ function createFactory() {
 
     return {
         init(canvas, bundle) {
-            // Defensive teardown for a misbehaving caller.
-            if (_tvContainer || _tvApi) {
-                _teardown(/* restoreCanvas */ false);
-            }
+            // Always run teardown at init start, even when there's
+            // no visible container/API to tear down. A previous
+            // activation that failed BEFORE alphaTab initialised
+            // (e.g. CDN load error, fetch error pre-container) would
+            // otherwise leak _tvFailedFile / _tvFailedArr into this
+            // lifetime — the new fetch would hit the previouslyFailed
+            // guard in draw() and silently skip, so re-picking Tab
+            // View would appear to do nothing. _teardown is cheap on
+            // already-null state.
+            _teardown(/* restoreCanvas */ false);
 
             const myToken = ++_tvInitToken;
             _tvHighwayCanvas = canvas;
