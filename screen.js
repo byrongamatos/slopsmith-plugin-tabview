@@ -121,6 +121,24 @@ function _ssPanelChrome(highwayCanvas) {
     return ss.panelChromeFor(highwayCanvas);
 }
 
+// Resolve the DOM mount target for tabview's container / error banner.
+// Splitscreen-active: ONLY the panel chrome is acceptable; if
+// panelChromeFor returns null mid-creation or during a screen
+// transition, return null so callers treat the mount as unavailable
+// (the container won't be cached, and a later draw() / resize() /
+// banner attempt retries cleanly once the panel chrome resolves).
+// Falling through to #player here would (a) cache _tvContainer
+// against the main player surface for the rest of the instance's
+// lifetime, rendering this panel's tabs over the wrong area, and
+// (b) confuse _tvSizeContainer's splitscreen vs main-player branch
+// since _ssActive() would still be true on subsequent calls.
+function _resolveMount(highwayCanvas) {
+    if (_ssActive()) {
+        return _ssPanelChrome(highwayCanvas);
+    }
+    return document.getElementById('player');
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Cursor sync helpers (stateless — beats come from the bundle)
 // ═══════════════════════════════════════════════════════════════════════
@@ -199,7 +217,7 @@ function createFactory() {
 
     function _tvCreateContainer() {
         if (_tvContainer) return _tvContainer;
-        const mount = _ssPanelChrome(_tvHighwayCanvas) || document.getElementById('player');
+        const mount = _resolveMount(_tvHighwayCanvas);
         if (!mount) return null;
 
         const c = document.createElement('div');
@@ -249,7 +267,7 @@ function createFactory() {
 
     function _tvSizeContainer() {
         if (!_tvContainer) return;
-        const mount = _ssPanelChrome(_tvHighwayCanvas) || document.getElementById('player');
+        const mount = _resolveMount(_tvHighwayCanvas);
         if (!mount) return;
         // Splitscreen: fill the panel chrome top-to-bottom (the panel
         // bar layers on top via z-index). Main-player: leave the top
@@ -280,7 +298,7 @@ function createFactory() {
 
     function _tvShowErrorBanner(message) {
         _tvRemoveErrorBanner();
-        const mount = _ssPanelChrome(_tvHighwayCanvas) || document.getElementById('player');
+        const mount = _resolveMount(_tvHighwayCanvas);
         if (!mount) return;
         const banner = document.createElement('div');
         banner.id = 'tabview-error-banner-' + _instanceId;
