@@ -275,6 +275,12 @@ function createFactory() {
         const topOffset = _ssActive() ? 0 : 60;
         _tvContainer.style.top = topOffset + 'px';
         _tvContainer.style.height = Math.max(0, mount.clientHeight - topOffset) + 'px';
+        // After a resize the cursor element's getBoundingClientRect
+        // changes even at the same tick, so re-position the
+        // highlight overlay. Without this the per-frame highlight
+        // update was masking the issue; now that _tvSyncCursor
+        // skips redundant updates, resize needs to drive it.
+        _tvUpdateHighlight();
     }
 
     function _tvRemoveContainer() {
@@ -432,6 +438,19 @@ function createFactory() {
             console.warn('[TabView] no filename known yet; skipping fetch');
             return;
         }
+        // Mount-availability guard. In splitscreen the panel chrome
+        // can be null transiently (panel mid-creation, screen
+        // transitions) — _resolveMount returns null in that case.
+        // Bail BEFORE setting _tvLoading* / hitting the network so
+        // draw()'s change-detect doesn't treat us as in-flight, and
+        // so we don't spam the GP5 endpoint with fetches that would
+        // immediately discard their results because _tvCreateContainer
+        // returns null too. The next draw() retries cleanly once the
+        // panel chrome resolves; load state stays "needs fetch" via
+        // _tvCurrentFile/_tvCurrentArr remaining unset.
+        if (!_resolveMount(_tvHighwayCanvas)) {
+            return;
+        }
         _tvLoadingFile = filename;
         _tvLoadingArr = arrIdx;
         try {
@@ -517,11 +536,16 @@ function createFactory() {
         if (!_tvApi || !_tvReady) return;
 
         const tick = _tvTimeToTick(currentTime, _tvLatestBeats);
-        if (Math.abs(tick - _tvLastTick) > 30) {
-            _tvLastTick = tick;
-            try { _tvApi.tickPosition = tick; } catch (_) {}
-        }
-
+        // Skip the (expensive) highlight update when the tick hasn't
+        // advanced — _tvUpdateHighlight runs N querySelectorAll calls
+        // across multiple selectors and roots, and at 60fps × N
+        // splitscreen instances that's a meaningful cost for state
+        // that doesn't change between frames. Resize-driven cursor
+        // movement still gets a highlight update via _onWinResize
+        // → _tvSizeContainer → _tvUpdateHighlight.
+        if (Math.abs(tick - _tvLastTick) <= 30) return;
+        _tvLastTick = tick;
+        try { _tvApi.tickPosition = tick; } catch (_) {}
         _tvUpdateHighlight();
     }
 
@@ -698,11 +722,19 @@ function createFactory() {
             const previouslyFailed = _tvFailedFile === filename &&
                 _tvFailedArr === arrIdx;
             if (chartChanged && !loadInFlight && !previouslyFailed) {
-                const myToken = ++_tvInitToken;
-                _tvLastTick = -1;
-                _tvFetchAndInit(filename, arrIdx, myToken);
-                // fall through — cursor sync below will be a no-op
-                // until _tvReady flips true again after the re-init.
+                // Defense-in-depth mount check. _tvFetchAndInit also
+                // guards (and is the single source of truth), but
+                // doing the check here too saves a per-frame
+                // _tvInitToken bump while the panel chrome is
+                // transient-null; tokens are cheap but the bump+bail
+                // pattern is dead work.
+                if (_resolveMount(_tvHighwayCanvas)) {
+                    const myToken = ++_tvInitToken;
+                    _tvLastTick = -1;
+                    _tvFetchAndInit(filename, arrIdx, myToken);
+                    // fall through — cursor sync below will be a no-op
+                    // until _tvReady flips true again after the re-init.
+                }
             }
 
             _tvSyncCursor(bundle.currentTime);
