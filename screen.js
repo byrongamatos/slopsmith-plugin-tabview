@@ -622,9 +622,19 @@ function createFactory() {
             // otherwise leak _tvFailedFile / _tvFailedArr into this
             // lifetime — the new fetch would hit the previouslyFailed
             // guard in draw() and silently skip, so re-picking Tab
-            // View would appear to do nothing. _teardown is cheap on
-            // already-null state.
-            _teardown(/* restoreCanvas */ false);
+            // View would appear to do nothing.
+            //
+            // restoreCanvas=true (not false) is critical here: a
+            // prior successful render hid the highway canvas via
+            // renderFinished, and skipping the restore would leave
+            // the canvas at visibility:hidden when the new init
+            // captures _tvPrevVisibility below — so a subsequent
+            // failed fetch / destroy would "restore" the canvas to
+            // hidden and strand the player blank. The
+            // _tvHighwayCanvas reference is also nulled by the
+            // restore branch, freeing the new init() to install
+            // the freshly-passed canvas without aliasing.
+            _teardown(/* restoreCanvas */ true);
             window.removeEventListener('resize', _onWinResize);
 
             const myToken = ++_tvInitToken;
