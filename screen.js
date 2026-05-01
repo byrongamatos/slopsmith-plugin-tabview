@@ -188,6 +188,11 @@ function createFactory() {
     let _tvHighwayCanvas = null;
     let _tvPrevVisibility = '';
 
+    // Mount position restore — when _tvCreateContainer() promotes a static
+    // mount to position:relative it saves the original inline style here so
+    // _tvRemoveContainer() can put it back on teardown.
+    let _tvPrevMountPosition = null;
+
     // Fetch / load tracking
     let _tvCurrentFile = null;   // filename the currently-loaded GP5 was fetched for
     let _tvCurrentArr = null;    // arrangement_index the current GP5 was fetched for
@@ -224,8 +229,11 @@ function createFactory() {
         // from the mount; that requires the mount to be a positioned
         // ancestor. Existing splitscreen/main-player mounts are; this
         // is an idempotent guard so a future host with a static mount
-        // doesn't silently collapse our overlay to 0 width.
+        // doesn't silently collapse our overlay to 0 width. The original
+        // inline position value is saved to _tvPrevMountPosition so
+        // _tvRemoveContainer() can restore it on teardown.
         if (getComputedStyle(mount).position === 'static') {
+            _tvPrevMountPosition = mount.style.position; // save inline value (often '')
             mount.style.position = 'relative';
         }
 
@@ -301,6 +309,12 @@ function createFactory() {
 
     function _tvRemoveContainer() {
         if (_tvContainer) {
+            // Restore mount's position style if we changed it in _tvCreateContainer().
+            if (_tvPrevMountPosition !== null) {
+                const mount = _tvContainer.parentElement;
+                if (mount) mount.style.position = _tvPrevMountPosition;
+                _tvPrevMountPosition = null;
+            }
             _tvContainer.remove();
             _tvContainer = null;
             _tvAtMount = null;

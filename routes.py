@@ -78,9 +78,9 @@ def setup(app: FastAPI, context: dict):
                         "Update the host or use a PSARC.",
                         status_code=501,
                     )
-                cache = get_sloppak_cache() if get_sloppak_cache else None
-                if cache is None:
-                    cache = Path(tempfile.gettempdir()) / "sloppak_cache"
+                raw_cache = get_sloppak_cache() if get_sloppak_cache else None
+                cache = Path(raw_cache) if raw_cache is not None else Path(tempfile.gettempdir()) / "sloppak_cache"
+                cache.mkdir(parents=True, exist_ok=True)
                 loaded = sloppak_mod.load_song(filename, Path(dlc), cache)
                 return _song_to_gp5(loaded.song, arrangement)
 
