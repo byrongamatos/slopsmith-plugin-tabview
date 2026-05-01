@@ -44,15 +44,32 @@ def setup(app: FastAPI, context: dict):
             return Response("DLC folder not configured", status_code=500)
 
         psarc_path = Path(dlc) / filename
+
+        # Path traversal guard: reject any filename that resolves outside dlc.
+        dlc_resolved = Path(dlc).resolve()
+        try:
+            resolved = psarc_path.resolve()
+        except Exception:
+            return Response("Path resolution failed", status_code=400)
+        if resolved != dlc_resolved and dlc_resolved not in resolved.parents:
+            return Response("Path traversal not allowed", status_code=400)
+
         if not psarc_path.exists():
             return Response("File not found", status_code=404)
 
         try:
-            # Sloppak (zip-form *.sloppak or directory-form): use the
-            # sloppak loader directly — no PSARC unpack required. Without
-            # this branch, unpack_psarc raises on the magic-byte check
-            # and the endpoint 500s for every sloppak song.
-            if filename.lower().endswith(".sloppak") or psarc_path.is_dir():
+            # Sloppak (zip-form *.sloppak or directory-form *.sloppak/): use
+            # the sloppak loader directly — no PSARC unpack required. Without
+            # this branch, unpack_psarc raises on the magic-byte check and the
+            # endpoint 500s for every sloppak song.  Only directories whose
+            # name ends with ".sloppak" are treated as sloppaks; plain
+            # directories (e.g. a mis-typed filename) fall through to the
+            # PSARC path and get a clear error rather than a 500 from the
+            # sloppak loader.
+            is_sloppak = filename.lower().endswith(".sloppak") or (
+                psarc_path.is_dir() and psarc_path.name.lower().endswith(".sloppak")
+            )
+            if is_sloppak:
                 try:
                     import sloppak as sloppak_mod
                 except ImportError:
