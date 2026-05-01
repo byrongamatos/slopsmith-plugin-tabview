@@ -14,7 +14,10 @@ if _lib not in sys.path:
 
 from song import load_song
 from psarc import unpack_psarc
-import sloppak as sloppak_mod
+
+# `sloppak` is loaded lazily inside the .sloppak branch below — older
+# cores ship without lib/sloppak.py, and a top-level import here would
+# disable Tab View entirely on those installs (PSARC path included).
 
 
 def setup(app: FastAPI, context: dict):
@@ -50,6 +53,14 @@ def setup(app: FastAPI, context: dict):
             # this branch, unpack_psarc raises on the magic-byte check
             # and the endpoint 500s for every sloppak song.
             if filename.lower().endswith(".sloppak") or psarc_path.is_dir():
+                try:
+                    import sloppak as sloppak_mod
+                except ImportError:
+                    return Response(
+                        "Sloppak support requires a newer Slopsmith core (lib/sloppak.py). "
+                        "Update the host or use a PSARC.",
+                        status_code=501,
+                    )
                 cache = get_sloppak_cache() if get_sloppak_cache else None
                 if cache is None:
                     cache = Path(tempfile.gettempdir()) / "sloppak_cache"
