@@ -63,9 +63,8 @@ def setup(app: FastAPI, context: dict):
             # this branch, unpack_psarc raises on the magic-byte check and the
             # endpoint 500s for every sloppak song.  Only directories whose
             # name ends with ".sloppak" are treated as sloppaks; plain
-            # directories (e.g. a mis-typed filename) fall through to the
-            # PSARC path and get a clear error rather than a 500 from the
-            # sloppak loader.
+            # directories are rejected with a 400 below before reaching
+            # unpack_psarc.
             is_sloppak = filename.lower().endswith(".sloppak") or (
                 psarc_path.is_dir() and psarc_path.name.lower().endswith(".sloppak")
             )
@@ -83,6 +82,14 @@ def setup(app: FastAPI, context: dict):
                 cache.mkdir(parents=True, exist_ok=True)
                 loaded = sloppak_mod.load_song(filename, Path(dlc), cache)
                 return _song_to_gp5(loaded.song, arrangement)
+
+            # Reject directories that are not .sloppak — unpack_psarc on a
+            # directory raises and returns a 500; surface a clear 400 instead.
+            if psarc_path.is_dir():
+                return Response(
+                    "Invalid path: directories must have a .sloppak extension",
+                    status_code=400,
+                )
 
             # PSARC path.
             tmp = tempfile.mkdtemp(prefix="rs_tabview_")
