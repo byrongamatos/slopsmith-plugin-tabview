@@ -220,12 +220,28 @@ function createFactory() {
         const mount = _resolveMount(_tvHighwayCanvas);
         if (!mount) return null;
 
+        // The overlay is positioned with left:0/right:0 to inherit width
+        // from the mount; that requires the mount to be a positioned
+        // ancestor. Existing splitscreen/main-player mounts are; this
+        // is an idempotent guard so a future host with a static mount
+        // doesn't silently collapse our overlay to 0 width.
+        if (getComputedStyle(mount).position === 'static') {
+            mount.style.position = 'relative';
+        }
+
         const c = document.createElement('div');
         c.id = 'tabview-container-' + _instanceId;
         c.className = 'tabview-container';
         c.dataset.tabviewInstance = String(_instanceId);
+        // visibility:hidden (not display:none) so alphaTab can measure
+        // the container's width during init. With display:none the
+        // element is out of layout and clientWidth is 0, which makes
+        // alphaTab skip the render entirely (warning: "AlphaTab skipped
+        // rendering because of width=0"). renderFinished swaps
+        // visibility to '' once the first paint lands, preserving the
+        // flash-free handoff this layer was originally designed for.
         c.style.cssText = [
-            'display:none',
+            'visibility:hidden',
             'position:absolute',
             'top:0',
             'left:0',
@@ -396,7 +412,7 @@ function createFactory() {
             // renderFinished never fired. Doing it here guarantees a
             // painted-to-painted handoff and lets the error path below
             // fall back to the still-visible 2D highway.
-            if (_tvContainer) _tvContainer.style.display = '';
+            if (_tvContainer) _tvContainer.style.visibility = '';
             if (_tvHighwayCanvas) _tvHighwayCanvas.style.visibility = 'hidden';
             _tvFailedFile = null;
             _tvFailedArr = null;
@@ -424,7 +440,7 @@ function createFactory() {
                 _tvFailedFile = failedFile;
                 _tvFailedArr = failedArr;
             }
-            if (_tvContainer) _tvContainer.style.display = 'none';
+            if (_tvContainer) _tvContainer.style.visibility = 'hidden';
             if (_tvHighwayCanvas) _tvHighwayCanvas.style.visibility = _tvPrevVisibility || '';
             const msg = (e && e.message) ? e.message : (typeof e === 'string' ? e : 'render failed');
             _tvShowErrorBanner(msg);
@@ -481,7 +497,7 @@ function createFactory() {
             // _tvCreateContainer returns null when the mount target
             // isn't in the DOM (player screen closed, unusual timing
             // during screen transitions). Without this guard the next
-            // line's _tvContainer.style.display = '' would throw on
+            // line's _tvContainer.style.visibility = '' would throw on
             // null and the failure path below would cache this as a
             // permanent failure for the song, even though the real
             // issue is transient DOM state.
@@ -514,7 +530,7 @@ function createFactory() {
             // that's being reloaded into a failing song, or the freshly
             // created empty container from an initial failed load) so
             // the highway fallback actually becomes visible.
-            if (_tvContainer) _tvContainer.style.display = 'none';
+            if (_tvContainer) _tvContainer.style.visibility = 'hidden';
             if (_tvHighwayCanvas) _tvHighwayCanvas.style.visibility = _tvPrevVisibility || '';
             const msg = (e && e.message) ? e.message : String(e);
             console.warn('[TabView] ' + msg);
