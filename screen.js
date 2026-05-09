@@ -84,19 +84,38 @@ function _tvLoadScript() {
 // _tvFilename when bundle.songInfo.filename isn't populated.
 
 (function () {
+    // Idempotency: if screen.js is re-evaluated (loader cache miss, hot reload,
+    // older core builds without the load-side guard), don't re-wrap playSong
+    // and don't re-subscribe to arrangement:changed — re-wrap grows the
+    // wrapper chain, and a duplicate listener would update _tvFilename twice
+    // per event.
+    //
+    // Two independent install steps with their own guards: the first eval
+    // may run before window.playSong / window.slopsmith are populated (load
+    // order, hot reload), so a single combined flag would lock out a later
+    // retry from the second eval. Mark the wrapper itself for playSong (per
+    // notedetect/stepmode convention) and a window flag for the listener.
+
     const origPlay = typeof window.playSong === 'function' ? window.playSong : null;
-    if (origPlay) {
-        window.playSong = async function (filename, arrangement) {
+    if (origPlay && !origPlay._tabviewWrapped) {
+        const wrapper = async function (filename, arrangement) {
             _tvFilename = filename;
             return origPlay.call(this, filename, arrangement);
         };
+        wrapper._tabviewWrapped = true;
+        window.playSong = wrapper;
     }
 
-    if (window.slopsmith && typeof window.slopsmith.on === 'function') {
+    if (
+        window.slopsmith &&
+        typeof window.slopsmith.on === 'function' &&
+        !window.__slopsmithTabviewArrangementSubscribed
+    ) {
         window.slopsmith.on('arrangement:changed', (e) => {
             // detail = { index, filename }
             if (e && e.detail && e.detail.filename) _tvFilename = e.detail.filename;
         });
+        window.__slopsmithTabviewArrangementSubscribed = true;
     }
 })();
 
