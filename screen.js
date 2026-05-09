@@ -111,11 +111,11 @@ function _tvLoadScript() {
         typeof window.slopsmith.on === 'function' &&
         !window.__slopsmithTabviewArrangementSubscribed
     ) {
-        window.__slopsmithTabviewArrangementSubscribed = true;
         window.slopsmith.on('arrangement:changed', (e) => {
             // detail = { index, filename }
             if (e && e.detail && e.detail.filename) _tvFilename = e.detail.filename;
         });
+        window.__slopsmithTabviewArrangementSubscribed = true;
     }
 })();
 
