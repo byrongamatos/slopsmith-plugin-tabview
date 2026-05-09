@@ -84,6 +84,15 @@ function _tvLoadScript() {
 // _tvFilename when bundle.songInfo.filename isn't populated.
 
 (function () {
+    // Idempotency: if screen.js is re-evaluated (loader cache miss, hot reload,
+    // older core builds without the load-side guard), don't re-wrap playSong
+    // and don't re-subscribe to arrangement:changed — re-wrap grows the
+    // wrapper chain, and a duplicate listener would update _tvFilename twice
+    // per event.
+    const HOOK_KEY = '__slopsmithTabviewHooksInstalled';
+    if (window[HOOK_KEY]) return;
+    window[HOOK_KEY] = true;
+
     const origPlay = typeof window.playSong === 'function' ? window.playSong : null;
     if (origPlay) {
         window.playSong = async function (filename, arrangement) {
